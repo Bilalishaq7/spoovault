@@ -9,37 +9,42 @@
 // The bottom bits are 0x1d (29).
 const GF_POLYNOMIAL = 0x1d;
 
+const LOG_TABLE = new Uint8Array(256);
+const EXP_TABLE = new Uint8Array(512); // Doubled size to avoid % 255 in gfMultiply
+
+// Statically pre-compute Galois Field Log and Anti-Log (Exp) lookup tables
+(function initGFTables() {
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    EXP_TABLE[i] = x;
+    EXP_TABLE[i + 255] = x;
+    LOG_TABLE[x] = i;
+
+    let temp = (x << 1) & 0xff;
+    if (x & 0x80) {
+      temp ^= GF_POLYNOMIAL;
+    }
+    x = temp;
+  }
+})();
+
 /**
- * Multiply two numbers in GF(256)
+ * Multiply two numbers in GF(256) using O(1) pre-computed lookup tables
  */
 export function gfMultiply(a: number, b: number): number {
-  let p = 0;
-  let tempA = a & 0xff;
-  let tempB = b & 0xff;
-  for (let i = 0; i < 8; i++) {
-    if (tempB & 1) {
-      p ^= tempA;
-    }
-    const hiBit = tempA & 0x80;
-    tempA = (tempA << 1) & 0xff;
-    if (hiBit) {
-      tempA ^= GF_POLYNOMIAL;
-    }
-    tempB >>= 1;
-  }
-  return p;
+  const tempA = a & 0xff;
+  const tempB = b & 0xff;
+  if (tempA === 0 || tempB === 0) return 0;
+  return EXP_TABLE[LOG_TABLE[tempA] + LOG_TABLE[tempB]];
 }
 
 /**
- * Find multiplicative inverse of a number in GF(256)
+ * Find multiplicative inverse of a number in GF(256) using O(1) pre-computed lookup table
  */
 export function gfInverse(a: number): number {
   const val = a & 0xff;
   if (val === 0) throw new Error("GF(256) division by zero");
-  for (let i = 1; i < 256; i++) {
-    if (gfMultiply(val, i) === 1) return i;
-  }
-  throw new Error("GF(256) inverse not found");
+  return EXP_TABLE[255 - LOG_TABLE[val]];
 }
 
 /**
