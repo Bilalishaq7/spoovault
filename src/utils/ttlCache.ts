@@ -39,4 +39,7 @@ export class TTLCache {
   }
 }
 
+// Export alias to fix TypeScript casing errors in contract.service.ts and test files
+export { TTLCache as TtlCache };
+
 export const readViewCache = new TTLCache(10);
