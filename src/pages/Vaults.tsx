@@ -42,8 +42,8 @@ import {
   DocumentData,
   VaultReleaseState,
 } from "../services/contract.service";
-import { toast } from "react-hot-toast";
-import { shortenAddress, isValidAddress, formatDate } from "../utils/helpers";
+import { shortenAddress, isValidAddress, isValidMultiChainAddress, formatDate } from "../utils/helpers";
+import { identityService } from "../services/identity.service";
 import { buttonClasses } from "../utils/buttonClasses";
 
 interface Vault extends VaultData {
@@ -55,7 +55,7 @@ const Vaults = () => {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "active" | "mine" | "inactive">("all");
   const [searchParams] = useSearchParams();
-  const { account, isConnected, connect, provider, signer, isFujiNetwork } = useWeb3();
+  const { account, isConnected, connect, provider, signer, isFujiNetwork, ecosystem } = useWeb3();
 
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [releaseStatesByVault, setReleaseStatesByVault] = useState<Record<number, VaultReleaseState>>({});
@@ -135,29 +135,44 @@ const Vaults = () => {
     }
   };
 
-  const handleAddGuardian = () => {
-    if (!formData.newGuardian.trim()) {
+  const handleAddGuardian = async () => {
+    const rawInput = formData.newGuardian.trim();
+    if (!rawInput) {
       toast.error("Please enter a guardian address");
       return;
     }
 
-    if (!isValidAddress(formData.newGuardian)) {
-      toast.error("Invalid Ethereum address");
+    if (!isValidMultiChainAddress(rawInput)) {
+      toast.error("Invalid address format. Enter an EVM address (0x...) or Stellar address (G...).");
       return;
     }
 
-    if (formData.guardians.includes(formData.newGuardian)) {
+    let resolvedAddress = rawInput;
+    const targetNetwork = ecosystem === "stellar" ? "stellar" : "avalanche";
+
+    try {
+      resolvedAddress = await identityService.resolveAddressForNetwork(rawInput, targetNetwork);
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to resolve guardian address for network");
+      return;
+    }
+
+    if (formData.guardians.includes(resolvedAddress)) {
       toast.error("Guardian already added");
       return;
     }
 
     setFormData({
       ...formData,
-      guardians: [...formData.guardians, formData.newGuardian],
+      guardians: [...formData.guardians, resolvedAddress],
       newGuardian: "",
     });
 
-    toast.success("Guardian added");
+    if (resolvedAddress !== rawInput) {
+      toast.success(`Guardian resolved and added as ${shortenAddress(resolvedAddress, 6)}`);
+    } else {
+      toast.success("Guardian added");
+    }
   };
 
   const handleRemoveGuardian = (address: string) => {

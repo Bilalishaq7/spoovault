@@ -71,10 +71,33 @@ export const formatDate = (timestamp: number): string => {
 };
 
 /**
- * Validate Ethereum address
+ * Validate EVM address format (0x...)
+ */
+export const isValidEVMAddress = (address: string): boolean => {
+  if (!address || typeof address !== "string") return false;
+  return /^0x[a-fA-F0-9]{40}$/.test(address.trim());
+};
+
+/**
+ * Validate Stellar address format (G...)
+ */
+export const isValidStellarAddress = (address: string): boolean => {
+  if (!address || typeof address !== "string") return false;
+  return /^G[A-Z2-7]{55}$/.test(address.trim());
+};
+
+/**
+ * Validate address format on either EVM or Stellar networks
+ */
+export const isValidMultiChainAddress = (address: string): boolean => {
+  return isValidEVMAddress(address) || isValidStellarAddress(address);
+};
+
+/**
+ * Validate address (supports both EVM and Stellar format)
  */
 export const isValidAddress = (address: string): boolean => {
-  return /^0x[a-fA-F0-9]{40}$/.test(address);
+  return isValidMultiChainAddress(address);
 };
 
 /**
