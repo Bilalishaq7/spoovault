@@ -1,0 +1,139 @@
+name: Static Security Analysis
+
+# Detects smart-contract & dependency vulnerabilities before merge and
+# publishes results to the GitHub Security / code-scanning tab (SARIF).
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Daily baseline scan so newly published advisories are caught.
+    - cron: "27 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Solidity SAST: Slither (primary gate) + Mythril (best-effort)
+  # ---------------------------------------------------------------------------
+  solidity-sast:
+    name: Solidity SAST (Slither / Mythril)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install Dependencies (for OpenZeppelin remappings)
+        run: npm install --legacy-peer-deps
+
+      - name: Slither Analysis
+        id: slither
+        uses: crytic/slither-action@v0.4.2
+        with:
+          target: contracts/
+          solc-version: 0.8.24
+          sarif: results/slither.sarif
+          # Fail the gate on high & medium severity findings.
+          fail-on: medium
+          args: --exclude-informational --exclude-low
+
+      - name: Upload Slither SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results/slither.sarif
+          category: slither
+
+      - name: Mythril Analysis (best-effort)
+        continue-on-error: true
+        working-directory: "."
+        run: |
+          pip install mythril
+          mkdir -p results
+          echo "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/" > remappings.txt
+          printf '{"optimizer":{"enabled":true,"runs":200}}' > solc-settings.json
+          myth analyze contracts/SpooVault.sol \
+            --remap-import "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/" \
+            --solc-json solc-settings.json \
+            --solv 0.8.24 \
+            --sarif results/mythril.sarif \
+            --timeout 600 || echo "::warning::Mythril did not complete analysis; skipping SARIF upload."
+
+      - name: Upload Mythril SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results/mythril.sarif
+          category: mythril
+
+  # ---------------------------------------------------------------------------
+  # Rust / Soroban SAST: cargo-audit (gate) + cargo-geiger + clippy
+  # ---------------------------------------------------------------------------
+  rust-sast:
+    name: Rust SAST (cargo-audit / cargo-geiger / clippy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts-stellar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+        working-directory: "."
+
+      - name: Run cargo-audit (Soroban Rust dependencies)
+        run: |
+          mkdir -p ../results
+          cargo audit --sarif > ../results/cargo-audit.sarif || true
+          # `cargo audit` exits non-zero when any vulnerability advisory is present,
+          # which fails this step and blocks the merge (the security gate).
+          cargo audit
+
+      - name: Upload cargo-audit SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results/cargo-audit.sarif
+          category: cargo-audit
+
+      - name: cargo-geiger (unsafe-code census, informational)
+        continue-on-error: true
+        run: |
+          cargo install cargo-geiger --locked || true
+          cargo geiger --output-format Json > ../results/cargo-geiger.json || true
+
+      - name: Upload cargo-geiger report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-geiger
+          path: results/cargo-geiger.json
+          if-no-files-found: warn
+
+      - name: Clippy (Rust lints, informational)
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -W warnings
