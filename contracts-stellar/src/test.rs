@@ -30,11 +30,7 @@ fn test_cross_chain_identity_registration_and_resolution() {
     let enc_pubkey = String::from_str(&env, "0x04bfcab5516089d846985a12");
 
     // Register cross-chain identity with public key
-    client.register_cross_chain_identity(
-        &stellar_user,
-        &evm_address,
-        &Some(enc_pubkey.clone()),
-    );
+    client.register_cross_chain_identity(&stellar_user, &evm_address, &Some(enc_pubkey.clone()));
 
     // Resolve EVM address to Stellar Address
     let resolved_stellar = client.resolve_evm_to_stellar(&evm_address);
@@ -69,11 +65,7 @@ fn test_cross_chain_identity_fallback_resolution() {
     client.register_public_key(&stellar_user, &stellar_pubkey);
 
     // Register cross-chain link without explicit separate pubkey
-    client.register_cross_chain_identity(
-        &stellar_user,
-        &evm_address,
-        &None,
-    );
+    client.register_cross_chain_identity(&stellar_user, &evm_address, &None);
 
     // Should resolve EVM address to the Stellar public key via fallback
     let resolved_pubkey = client.resolve_evm_to_public_key(&evm_address);
