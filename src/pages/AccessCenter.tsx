@@ -91,7 +91,7 @@ interface InboxKeyPreviewItem {
 
 const AccessCenter = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { account, isConnected, connect, provider, signer, isFujiNetwork } = useWeb3();
+  const { account, isConnected, connect, provider, signer, isFujiNetwork, ecosystem } = useWeb3();
 
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -111,13 +111,15 @@ const AccessCenter = () => {
   const accessibleOnly = searchParams.get("scope") === "accessible";
 
   useEffect(() => {
-    if (isConnected && provider && signer && isFujiNetwork) {
-      contractService.initialize(provider, signer);
+    if (isConnected && (ecosystem === "stellar" || (provider && signer && isFujiNetwork))) {
+      if (ecosystem !== "stellar" && provider && signer) {
+        contractService.initialize(provider, signer);
+      }
       loadData();
     } else {
       setLoading(false);
     }
-  }, [account, isConnected, provider, signer, isFujiNetwork]);
+  }, [account, isConnected, provider, signer, isFujiNetwork, ecosystem]);
 
   const loadData = async () => {
     if (!account) {
@@ -509,18 +511,32 @@ const AccessCenter = () => {
   }, [rows, search, vaultNameById, hasVaultFilter, selectedVaultFromQuery, accessibleOnly]);
 
   const handleRequestAccess = async (docId: number) => {
-    if (!isConnected) {
+    if (!isConnected || !account) {
       toast.error("Please connect your wallet first");
       await connect();
       return;
     }
-    if (!isFujiNetwork) {
+
+    const targetDoc = documents.find((d) => d.id === docId);
+    const targetVault = targetDoc ? vaults.find((v) => v.id === targetDoc.vaultId) : null;
+    const vaultNetwork: "avalanche" | "stellar" = targetVault?.network || ecosystem;
+
+    if (vaultNetwork === "avalanche" && !isFujiNetwork) {
       toast.error("Please switch to Avalanche Fuji network");
       return;
     }
 
     setRequestingDocId(docId);
     try {
+      const hasPass = await contractService.hasVaultToken(
+        account,
+        targetDoc?.vaultId || 0,
+        vaultNetwork
+      );
+      if (!hasPass) {
+        throw new Error(`Access pass token verification failed for ${vaultNetwork} network vault.`);
+      }
+
       const requestId = await contractService.requestAccess(docId);
       if (!requestId) {
         toast.error("Request submitted but ID was not returned");
@@ -642,7 +658,7 @@ const AccessCenter = () => {
     );
   }
 
-  if (!isFujiNetwork) {
+  if (ecosystem !== "stellar" && !isFujiNetwork) {
     return (
       <div className="space-y-8">
         <div className="rounded-2xl bg-gradient-to-r from-yellow-500/10 to-orange-500/10 border border-yellow-500/30 p-8 text-center">

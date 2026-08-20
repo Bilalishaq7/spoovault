@@ -10,6 +10,7 @@ export interface VaultData {
   approvalThreshold: number;
   isActive: boolean;
   createdAt: number;
+  network?: "avalanche" | "stellar";
 }
 
 export interface DocumentData {
@@ -885,6 +886,7 @@ const mapVaultData = (vault: any): VaultData => ({
   approvalThreshold: Number(vault[5]),
   isActive: vault[6],
   createdAt: Number(vault[7]),
+  network: "avalanche",
 });
 
 const mapDocumentData = (doc: any): DocumentData => ({
@@ -1408,6 +1410,23 @@ const fetchUserTokens = async (account: string): Promise<TokenData[]> => {
     .sort((a, b) => b.tokenId - a.tokenId);
 };
 
+const hasVaultToken = async (account: string, vaultId: number): Promise<boolean> => {
+  if (!account || !vaultId || vaultId <= 0) return false;
+  try {
+    await ensureContractDeployed();
+    const contract = ensureReadContract();
+    const result = await contract.hasVaultToken(account, vaultId);
+    return Boolean(result);
+  } catch {
+    try {
+      const userTokens = await fetchUserTokens(account);
+      return userTokens.some((t) => t.vaultId === vaultId);
+    } catch {
+      return false;
+    }
+  }
+};
+
 const getActivePassCountByVault = async (
   vaultIds: number[]
 ): Promise<Record<number, number>> => {
@@ -1739,6 +1758,42 @@ const proxiedGetLatestRequestsForUser = async (
   return getLatestRequestsForUser(user, documentIds);
 };
 
+const proxiedFetchUserTokens = async (account: string): Promise<TokenData[]> => {
+  if (getEcosystem() === "stellar") {
+    return stellarService.fetchUserTokens(account) as unknown as Promise<TokenData[]>;
+  }
+  return fetchUserTokens(account);
+};
+
+const proxiedHasVaultToken = async (
+  account: string,
+  vaultId: number,
+  network?: "avalanche" | "stellar"
+): Promise<boolean> => {
+  const targetNetwork = network || getEcosystem();
+  try {
+    if (targetNetwork === "stellar") {
+      return await stellarService.hasVaultToken(account, vaultId);
+    } else if (targetNetwork === "avalanche") {
+      return await hasVaultToken(account, vaultId);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+const proxiedMintAccessToken = async (
+  vaultId: number,
+  to: string,
+  tokenURI: string
+): Promise<number> => {
+  if (getEcosystem() === "stellar") {
+    return stellarService.mintAccessToken(vaultId, to, tokenURI);
+  }
+  return mintAccessToken(vaultId, to, tokenURI);
+};
+
 export const contractService = {
   initialize,
   clear,
@@ -1748,7 +1803,7 @@ export const contractService = {
   requestAccess: proxiedRequestAccess,
   approveAccess: proxiedApproveAccess,
   acceptGuardianInvite: proxiedAcceptGuardianInvite,
-  mintAccessToken,
+  mintAccessToken: proxiedMintAccessToken,
   burnAccessToken,
   fetchVaults,
   fetchVaultsByIds,
@@ -1756,7 +1811,8 @@ export const contractService = {
   fetchDocuments,
   fetchDocumentsForVaults: proxiedFetchDocumentsForVaults,
   fetchPendingInvites: proxiedFetchPendingInvites,
-  fetchUserTokens,
+  fetchUserTokens: proxiedFetchUserTokens,
+  hasVaultToken: proxiedHasVaultToken,
   getActivePassCountByVault,
   getTotalSupply,
   hasActiveAccess: proxiedHasActiveAccess,

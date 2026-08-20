@@ -1,5 +1,6 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
+import { expect } from "chai";
+import hre from "hardhat";
+const { ethers } = hre;
 
 describe("SpooVault EVM Contract Unit Tests", function () {
   let spooVault;
@@ -72,7 +73,7 @@ describe("SpooVault EVM Contract Unit Tests", function () {
       const guardians = [guardian1.address];
       await spooVault.connect(owner).createVault("Inheritance Vault", "Desc", guardians, 1);
 
-      await expect(spooVault.connect(owner).recordProofOfLife(1))
+      await expect(spooVault.connect(owner).proveLife(1))
         .to.emit(spooVault, "ProofOfLifeRecorded");
     });
 
@@ -80,7 +81,7 @@ describe("SpooVault EVM Contract Unit Tests", function () {
       const guardians = [guardian1.address];
       await spooVault.connect(owner).createVault("Emergency Vault", "Desc", guardians, 1);
 
-      await expect(spooVault.connect(owner).toggleEmergencyMode(1, true))
+      await expect(spooVault.connect(owner).setEmergencyMode(1, true))
         .to.emit(spooVault, "EmergencyModeUpdated")
         .withArgs(1, true);
     });
