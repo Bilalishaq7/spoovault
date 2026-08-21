@@ -4,7 +4,7 @@ import { defineConfig, devices } from "@playwright/test";
  * Playwright configuration for the SpooVault Web3 E2E suite.
  *
  * Wallet automation is provided by Synpress v4 (Playwright + MetaMask). The
- * MetaMask browser cache is built once with `npx synpress e2e/wallet-setup`
+ * MetaMask browser cache is built once with `npx @synthetixio/synpress e2e/wallet-setup`
  * before `npx playwright test` is executed (see .github/workflows/e2e.yml).
  *
  * A local Anvil node (chain-id 43113) and the freshly deployed `SpooVault`

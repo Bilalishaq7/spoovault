@@ -40,7 +40,7 @@ jobs:
         run: npx hardhat compile --config hardhat.config.cjs
 
       - name: Build MetaMask browser cache (Synpress)
-        run: HEADLESS=true npx synpress@4.1.2 e2e/wallet-setup
+        run: HEADLESS=true npx @synthetixio/synpress@4.1.2 e2e/wallet-setup
 
       - name: Run E2E suite (Anvil + SpooVault + MetaMask)
         run: |
