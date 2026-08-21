@@ -39,3 +39,9 @@ dev.log
 # Hardhat
 artifacts/
 cache/
+
+# Rust / Soroban
+contracts-stellar/target/
+contracts-stellar/test_snapshots/
+
+

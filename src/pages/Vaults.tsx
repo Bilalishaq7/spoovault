@@ -42,10 +42,9 @@ import {
   DocumentData,
   VaultReleaseState,
 } from "../services/contract.service";
-import { shortenAddress, isValidAddress, isValidMultiChainAddress, formatDate } from "../utils/helpers";
+import { shortenAddress, isValidMultiChainAddress, formatDate, getVaultGID } from "../utils/helpers";
 import { identityService } from "../services/identity.service";
 import { toast } from "react-hot-toast";
-import { shortenAddress, isValidAddress, formatDate, getVaultGID } from "../utils/helpers";
 import { buttonClasses } from "../utils/buttonClasses";
 
 interface Vault extends VaultData {
@@ -58,7 +57,6 @@ const Vaults = () => {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "active" | "mine" | "inactive">("all");
   const [searchParams] = useSearchParams();
-  const { account, isConnected, connect, provider, signer, isFujiNetwork, ecosystem } = useWeb3();
   const { account, isConnected, connect, provider, signer, isFujiNetwork, ecosystem, chainId } = useWeb3();
 
   const [vaults, setVaults] = useState<Vault[]>([]);

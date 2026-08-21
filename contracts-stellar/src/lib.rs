@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, Map, String, Symbol, Vec,
+    contract, contractimpl, contracttype, Address, Env, String, Vec,
 };
 
 #[contracttype]
@@ -363,7 +363,7 @@ impl SpooVaultStellar {
         env: Env,
         approver: Address,
         request_id: u64,
-        encrypted_share_for_beneficiary: Option<String>,
+        encrypted_share: Option<String>,
     ) {
         approver.require_auth();
 
@@ -410,7 +410,7 @@ impl SpooVaultStellar {
         env.storage().persistent().set(&DataKey::ApprovedReq(request_id, approver.clone()), &true);
         request.approved_by.push_back(approver.clone());
 
-        if let Some(share) = encrypted_share_for_beneficiary {
+        if let Some(share) = encrypted_share {
             env.storage().persistent().set(&DataKey::BShare(request_id, approver), &share);
         }
 

@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{vec, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, vec, Address, Env, String};
 
 #[test]
 fn test_register_and_get_public_key() {
@@ -10,7 +10,7 @@ fn test_register_and_get_public_key() {
     let client = SpooVaultStellarClient::new(&env, &contract_id);
 
     let user = Address::generate(&env);
-    env.mock_all_signatures();
+    env.mock_all_auths();
 
     let pubkey = String::from_str(&env, "B64_STELLAR_PUBKEY_TEST");
     client.register_public_key(&user, &pubkey);
@@ -28,7 +28,7 @@ fn test_create_vault_and_get_vault() {
     let creator = Address::generate(&env);
     let g1 = Address::generate(&env);
     let g2 = Address::generate(&env);
-    env.mock_all_signatures();
+    env.mock_all_auths();
 
     let name = String::from_str(&env, "Soroban Vault");
     let desc = String::from_str(&env, "Stellar Soroban Secure Vault");
@@ -56,7 +56,7 @@ fn test_accept_guardian_invite() {
 
     let creator = Address::generate(&env);
     let g1 = Address::generate(&env);
-    env.mock_all_signatures();
+    env.mock_all_auths();
 
     let name = String::from_str(&env, "Family Vault");
     let desc = String::from_str(&env, "Guardians Test");
@@ -82,7 +82,7 @@ fn test_add_document_and_access_flow() {
     let creator = Address::generate(&env);
     let g1 = Address::generate(&env);
     let requester = Address::generate(&env);
-    env.mock_all_signatures();
+    env.mock_all_auths();
 
     let name = String::from_str(&env, "Financial Vault");
     let desc = String::from_str(&env, "Financial records");
@@ -133,7 +133,7 @@ fn test_prove_life_and_emergency_mode() {
 
     let creator = Address::generate(&env);
     let g1 = Address::generate(&env);
-    env.mock_all_signatures();
+    env.mock_all_auths();
 
     let name = String::from_str(&env, "Emergency Vault");
     let desc = String::from_str(&env, "Emergency release test");
