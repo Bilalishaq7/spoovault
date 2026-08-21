@@ -26,7 +26,7 @@ jobs:
           docker run --rm \
             -v "$PWD":/src -w /src \
             trailofbits/echidna:v2.2.3 \
-            /src/fuzz/harness/SpooVaultFuzz.sol \
+            echidna /src/fuzz/harness/SpooVaultFuzz.sol \
             --contract SpooVaultFuzz \
             --config /src/fuzz/echidna/config.yaml \
             --test-mode property
@@ -44,7 +44,7 @@ jobs:
           go-version: '1.22'
 
       - name: Install Medusa
-        run: go install github.com/crytic/medusa@latest
+        run:           go install github.com/crytic/medusa@v0.1.8
 
       - name: Install dependencies (for OpenZeppelin imports)
         run: npm install --legacy-peer-deps
