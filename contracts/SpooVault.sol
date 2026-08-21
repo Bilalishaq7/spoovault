@@ -225,7 +225,7 @@ contract SpooVault is ERC721, ISpooVault {
         string memory description,
         address[] memory guardians,
         uint256 approvalThreshold
-    ) external returns (uint256) {
+    ) external nonReentrant returns (uint256) {
         uint256 externalGuardianCount = 0;
 
         for (uint256 i = 0; i < guardians.length; i++) {
@@ -294,7 +294,7 @@ contract SpooVault is ERC721, ISpooVault {
     /**
      * @dev Accept a guardian invitation. Guardian power is granted only after acceptance.
      */
-    function acceptGuardianInvite(uint256 vaultId) external {
+    function acceptGuardianInvite(uint256 vaultId) external nonReentrant {
         if (!vaults[vaultId].isActive) revert VaultNotActive();
         if (isGuardian[vaultId][msg.sender]) revert AlreadyGuardian();
 
@@ -319,7 +319,7 @@ contract SpooVault is ERC721, ISpooVault {
         string memory encryptedMetadata,
         string memory ipfsHash,
         AccessLevel requiredAccess
-    ) external returns (uint256) {
+    ) external nonReentrant returns (uint256) {
         address[] memory emptyGuardians;
         string[] memory emptyShares;
         return _addDocument(
@@ -342,7 +342,7 @@ contract SpooVault is ERC721, ISpooVault {
         string memory ipfsHash,
         AccessLevel requiredAccess,
         ReleaseCondition releaseCondition
-    ) external returns (uint256) {
+    ) external nonReentrant returns (uint256) {
         address[] memory emptyGuardians;
         string[] memory emptyShares;
         return _addDocument(
@@ -389,7 +389,7 @@ contract SpooVault is ERC721, ISpooVault {
         ReleaseCondition releaseCondition,
         address[] calldata guardiansList,
         string[] calldata shares
-    ) external returns (uint256) {
+    ) external nonReentrant returns (uint256) {
         return _addDocument(
             vaultId,
             encryptedMetadata,
@@ -404,7 +404,7 @@ contract SpooVault is ERC721, ISpooVault {
     /**
      * @dev Configure how long owner inactivity unlocks post-death mode.
      */
-    function configureVaultRelease(uint256 vaultId, uint256 inactivityPeriod) external {
+    function configureVaultRelease(uint256 vaultId, uint256 inactivityPeriod) external nonReentrant {
         if (vaults[vaultId].id == 0) revert VaultNotExist();
         if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
         if (!vaults[vaultId].isActive) revert VaultNotActive();
@@ -419,7 +419,7 @@ contract SpooVault is ERC721, ISpooVault {
     /**
      * @dev Owner heartbeat to keep vault in live mode.
      */
-    function proveLife(uint256 vaultId) external {
+    function proveLife(uint256 vaultId) external nonReentrant {
         if (vaults[vaultId].id == 0) revert VaultNotExist();
         if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
         if (!vaults[vaultId].isActive) revert VaultNotActive();
@@ -431,7 +431,7 @@ contract SpooVault is ERC721, ISpooVault {
     /**
      * @dev Owner can toggle emergency mode for rapid release workflows.
      */
-    function setEmergencyMode(uint256 vaultId, bool enabled) external {
+    function setEmergencyMode(uint256 vaultId, bool enabled) external nonReentrant {
         if (vaults[vaultId].id == 0) revert VaultNotExist();
         if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
         if (!vaults[vaultId].isActive) revert VaultNotActive();
@@ -446,7 +446,7 @@ contract SpooVault is ERC721, ISpooVault {
     function setDocumentReleaseCondition(
         uint256 documentId,
         ReleaseCondition condition
-    ) external {
+    ) external nonReentrant {
         if (documents[documentId].id == 0) revert DocumentNotExist();
         uint256 vaultId = documents[documentId].vaultId;
         if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
@@ -479,7 +479,7 @@ contract SpooVault is ERC721, ISpooVault {
      * @dev Propose removal of a guardian from the vault.
      * Requires majority consensus (>50%) of guardians to approve before execution.
      */
-    function proposeGuardianRemoval(uint256 vaultId, address guardianToRemove) external {
+    function proposeGuardianRemoval(uint256 vaultId, address guardianToRemove) external nonReentrant {
         if (vaults[vaultId].id == 0) revert VaultNotExist();
         if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
         if (!isGuardian[vaultId][guardianToRemove]) revert GuardianNotExists();
@@ -509,7 +509,7 @@ contract SpooVault is ERC721, ISpooVault {
      * @dev Approve a guardian removal proposal.
      * Once >50% of guardians approve, the proposal is ready for execution.
      */
-    function approveGuardianRemoval(uint256 vaultId, address guardianToRemove) external {
+    function approveGuardianRemoval(uint256 vaultId, address guardianToRemove) external nonReentrant {
         if (vaults[vaultId].id == 0) revert VaultNotExist();
         if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
 
@@ -529,7 +529,7 @@ contract SpooVault is ERC721, ISpooVault {
      * @dev Propose an update to the vault's approval threshold.
      * Requires majority consensus (>50%) of guardians to approve before execution.
      */
-    function proposeThresholdUpdate(uint256 vaultId, uint256 newThreshold) external {
+    function proposeThresholdUpdate(uint256 vaultId, uint256 newThreshold) external nonReentrant {
         if (vaults[vaultId].id == 0) revert VaultNotExist();
         if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
         if (newThreshold == 0 || newThreshold > vaults[vaultId].guardians.length) {
@@ -560,7 +560,7 @@ contract SpooVault is ERC721, ISpooVault {
      * @dev Approve a threshold update proposal.
      * Once >50% of guardians approve, the proposal is ready for execution.
      */
-    function approveThresholdUpdate(uint256 vaultId, uint256 newThreshold) external {
+    function approveThresholdUpdate(uint256 vaultId, uint256 newThreshold) external nonReentrant {
         if (vaults[vaultId].id == 0) revert VaultNotExist();
         if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
 
@@ -585,7 +585,7 @@ contract SpooVault is ERC721, ISpooVault {
         uint256 vaultId,
         address guardianToRemove,
         uint256 newThreshold
-    ) external {
+    ) external nonReentrant {
         if (vaults[vaultId].id == 0) revert VaultNotExist();
 
         Vault storage vault = vaults[vaultId];
@@ -691,7 +691,7 @@ contract SpooVault is ERC721, ISpooVault {
     /**
      * @dev Request access to a document. Requires current ownership of a vault NFT.
      */
-    function requestAccess(uint256 documentId) external returns (uint256) {
+    function requestAccess(uint256 documentId) external nonReentrant returns (uint256) {
         if (documents[documentId].id == 0) revert DocumentNotExist();
         if (_hasActiveAccess(documentId, msg.sender)) revert AlreadyHasAccess();
         if (!_isReleaseConditionSatisfied(documentId)) revert ReleaseConditionLocked();
@@ -732,7 +732,7 @@ contract SpooVault is ERC721, ISpooVault {
     /**
      * @dev Approve an access request (accepted guardian only, never the requester).
      */
-    function approveAccess(uint256 requestId) external {
+    function approveAccess(uint256 requestId) external nonReentrant {
         _approveAccess(requestId, "");
     }
 
@@ -741,7 +741,7 @@ contract SpooVault is ERC721, ISpooVault {
      * The requester can never approve their own request; quorum therefore counts only
      * distinct accepted guardians other than the requester.
      */
-    function approveAccess(uint256 requestId, string calldata encryptedShareForBeneficiary) external {
+    function approveAccess(uint256 requestId, string calldata encryptedShareForBeneficiary) external nonReentrant {
         _approveAccess(requestId, encryptedShareForBeneficiary);
     }
 
@@ -780,7 +780,7 @@ contract SpooVault is ERC721, ISpooVault {
     /**
      * @dev Revoke access from user for a specific document.
      */
-    function revokeAccess(uint256 documentId, address user) external {
+    function revokeAccess(uint256 documentId, address user) external nonReentrant {
         if (documents[documentId].id == 0) revert DocumentNotExist();
 
         uint256 vaultId = documents[documentId].vaultId;
@@ -800,7 +800,7 @@ contract SpooVault is ERC721, ISpooVault {
         uint256 vaultId,
         address to,
         string memory tokenURIValue
-    ) external returns (uint256) {
+    ) external nonReentrant returns (uint256) {
         if (!vaults[vaultId].isActive) revert VaultNotActive();
         if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
 
@@ -818,7 +818,7 @@ contract SpooVault is ERC721, ISpooVault {
     /**
      * @dev Burn NFT access token and invalidate all prior grants for owner+vault in O(1).
      */
-    function burnAccessToken(uint256 tokenId) external {
+    function burnAccessToken(uint256 tokenId) external nonReentrant {
         address owner = ownerOf(tokenId);
         if (!_isTokenOwnerOrApproved(owner, msg.sender, tokenId)) {
             revert NotOwnerOrApproved();
