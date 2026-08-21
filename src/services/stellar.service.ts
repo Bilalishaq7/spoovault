@@ -172,6 +172,8 @@ export const getContractId = (): string => {
   return cid || contractId || "";
 };
 
+
+
 const isConfigured = (): boolean => {
   return !!getContractId();
 };
