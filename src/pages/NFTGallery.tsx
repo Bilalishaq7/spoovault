@@ -32,7 +32,7 @@ import {
   VaultData,
 } from "../services/contract.service";
 import { toast } from "react-hot-toast";
-import { formatDate, getIPFSURL, isValidAddress, shortenAddress } from "../utils/helpers";
+import { fetchFromIPFS, formatDate, getIPFSURL, isValidAddress, shortenAddress } from "../utils/helpers";
 import { buttonClasses } from "../utils/buttonClasses";
 import { captureError } from "../services/telemetry.service";
 import { getExplorerBaseUrl as getSharedExplorerBaseUrl, getExplorerTokenUrl as getSharedExplorerTokenUrl } from "../utils/explorer";
@@ -302,11 +302,14 @@ const NFTGallery = () => {
       return;
     }
 
-    const resolvedUri = rawUri.startsWith("ipfs://") ? getIPFSURL(rawUri) : rawUri;
+    const isIpfsUri = rawUri.startsWith("ipfs://");
+    const resolvedUri = isIpfsUri ? getIPFSURL(rawUri) : rawUri;
     setViewMetadataSource(resolvedUri);
 
     try {
-      const response = await fetch(resolvedUri, { method: "GET" });
+      const response = isIpfsUri
+        ? await fetchFromIPFS(rawUri)
+        : await fetch(resolvedUri, { method: "GET" });
       if (!response.ok) {
         throw new Error(`Metadata fetch failed (${response.status})`);
       }
