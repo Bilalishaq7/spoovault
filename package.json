@@ -50,7 +50,7 @@
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "@nomicfoundation/hardhat-verify": "^2.1.0",
     "@nomicfoundation/ignition-core": "^0.15.15",
-    "@playwright/test": "^1.48.0",
+    "@playwright/test": "1.48.2",
     "@synthetixio/synpress": "^4.1.2",
     "@typechain/ethers-v6": "^0.5.0",
     "@typechain/hardhat": "^9.0.0",
