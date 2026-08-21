@@ -54,8 +54,6 @@ function ensureNetwork() {
       RPC_URL,
       "--network-passphrase",
       NETWORK_PASSPHRASE,
-      "--friendbot-url",
-      `${RPC_URL}/friendbot`,
     ],
     { allowFail: true },
   );
@@ -77,7 +75,7 @@ before(async () => {
       allowFail: true,
     });
     runStellar(["keys", "fund", name, "--network", NETWORK], { allowFail: true });
-    return runStellar(["keys", "show", name, "--network", NETWORK]);
+    return runStellar(["keys", "secret", name]);
   };
 
   creator = makeKey("creator");
