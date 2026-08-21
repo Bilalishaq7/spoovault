@@ -80,10 +80,11 @@ Thank you for your interest in contributing to SpooVault! This project is a **mu
    ```bash
    npm run dev
    ```
-2. Start the local Pinata proxy (optional, for testing IPFS uploads without exposing keys):
+2. Start the local Pinata proxy (optional, for testing IPFS uploads without exposing Pinata keys):
    ```bash
-   npm run proxy:pinata
+   SPOOVUALT_PROXY_SECRET=dev-hmac-secret PINATA_JWT=your_jwt npm run proxy:pinata
    ```
+   Set the same value in `VITE_SPOOVUALT_PROXY_SECRET`. Unsigned or cross-origin pin requests are rejected with 403.
 3. Use the network switcher in the header sidebar to toggle between Avalanche (MetaMask) and Stellar (Freighter).
 
 ---

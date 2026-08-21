@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Pinata proxy HMAC auth and CORS lock-down (Issue #27)**:
+  - Restricted `scripts/pinata-proxy.mjs` CORS to `SPOOVUALT_ALLOWED_ORIGINS` instead of `Access-Control-Allow-Origin: *`.
+  - Required `X-SpooVault-Signature` HMAC verification on pin/list routes so unsigned external requests are rejected with 403 Forbidden, keeping the Pinata JWT off the public internet.
 - **Web Crypto API ECIES Migration (Issue #17)**:
   - Replaced deprecated MetaMask `eth_decrypt` and `eth_getEncryptionPublicKey` RPC methods with browser-native Web Crypto API ECIES (ECDH P-256 + AES-256-GCM).
   - Built `clientKeyringService` with browser IndexedDB storage (`spoovault-keyring`), encrypting client-side private keys using PBKDF2-SHA256 (600,000 iterations) + AES-256-GCM with optional PIN/passphrase protection and in-memory session caching.

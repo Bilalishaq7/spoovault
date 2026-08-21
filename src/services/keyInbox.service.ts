@@ -1,4 +1,5 @@
 import axios from "axios";
+import { signProxyRequest } from "../utils/ipfsProxySignature";
 
 const PINATA_API_URL =
   import.meta.env.VITE_IPFS_API_URL || "https://api.pinata.cloud";
@@ -35,9 +36,21 @@ interface PinRow {
 
 const IPFS_PROXY_URL =
   (import.meta.env.VITE_IPFS_PROXY_URL as string | undefined)?.trim() || "";
+const PROXY_SECRET =
+  (import.meta.env.VITE_SPOOVUALT_PROXY_SECRET as string | undefined)?.trim() || "";
 
 const isConfigured = (): boolean => {
-  return !!IPFS_PROXY_URL || !!PINATA_JWT || (!!PINATA_API_KEY && !!PINATA_API_SECRET);
+  if (IPFS_PROXY_URL) {
+    return !!PROXY_SECRET;
+  }
+  return !!PINATA_JWT || (!!PINATA_API_KEY && !!PINATA_API_SECRET);
+};
+
+const getProxySecret = (): string => {
+  if (!PROXY_SECRET) {
+    throw new Error("IPFS proxy signing secret is not configured");
+  }
+  return PROXY_SECRET;
 };
 
 const buildAuthHeaders = (): Record<string, string> => {
@@ -75,29 +88,35 @@ const sendKeyEnvelope = async (payload: KeyEnvelopePayload): Promise<string> => 
 
   let response;
   if (IPFS_PROXY_URL) {
-    response = await axios.post(
-      `${IPFS_PROXY_URL}/api/ipfs/pin-json`,
-      {
-        pinataContent: content,
-        pinataMetadata: {
-          name: ENVELOPE_NAME,
-          keyvalues: {
-            type: "beneficiary_key_envelope",
-            beneficiary,
-            contract,
-            chainId: String(content.chainId),
-            documentId: String(content.documentId),
-            vaultId: String(content.vaultId),
-            issuedBy,
-            issuedAt: content.issuedAt,
-          },
+    const body = JSON.stringify({
+      pinataContent: content,
+      pinataMetadata: {
+        name: ENVELOPE_NAME,
+        keyvalues: {
+          type: "beneficiary_key_envelope",
+          beneficiary,
+          contract,
+          chainId: String(content.chainId),
+          documentId: String(content.documentId),
+          vaultId: String(content.vaultId),
+          issuedBy,
+          issuedAt: content.issuedAt,
         },
       },
-      {
-        headers: { "Content-Type": "application/json" },
-        timeout: 30000,
-      }
-    );
+    });
+    const auth = await signProxyRequest({
+      secret: getProxySecret(),
+      method: "POST",
+      path: "/api/ipfs/pin-json",
+      body,
+    });
+    response = await axios.post(`${IPFS_PROXY_URL}/api/ipfs/pin-json`, body, {
+      headers: {
+        "Content-Type": "application/json",
+        ...auth.headers,
+      },
+      timeout: 30000,
+    });
   } else {
     response = await axios.post(
       `${PINATA_API_URL}/pinning/pinJSONToIPFS`,
@@ -151,12 +170,19 @@ const listEnvelopeHashesForBeneficiary = async (
   for (let page = 0; page < maxPages && matches.length < maxMatches; page++) {
     let response;
     if (IPFS_PROXY_URL) {
-      response = await axios.get(`${IPFS_PROXY_URL}/api/ipfs/pin-list`, {
-        params: {
-          status: "pinned",
-          pageLimit,
-          pageOffset: page * pageLimit,
-        },
+      const query = new URLSearchParams({
+        status: "pinned",
+        pageLimit: String(pageLimit),
+        pageOffset: String(page * pageLimit),
+      });
+      const path = `/api/ipfs/pin-list?${query.toString()}`;
+      const auth = await signProxyRequest({
+        secret: getProxySecret(),
+        method: "GET",
+        path,
+      });
+      response = await axios.get(`${IPFS_PROXY_URL}${path}`, {
+        headers: auth.headers,
         timeout: 30000,
       });
     } else {

@@ -1,4 +1,5 @@
 import axios from "axios";
+import { signProxyRequest } from "../utils/ipfsProxySignature";
 
 const PINATA_API_URL =
   import.meta.env.VITE_IPFS_API_URL || "https://api.pinata.cloud";
@@ -10,9 +11,21 @@ const IPFS_GATEWAY =
 
 const IPFS_PROXY_URL =
   (import.meta.env.VITE_IPFS_PROXY_URL as string | undefined)?.trim() || "";
+const PROXY_SECRET =
+  (import.meta.env.VITE_SPOOVUALT_PROXY_SECRET as string | undefined)?.trim() || "";
 
 const isConfigured = (): boolean => {
-  return !!IPFS_PROXY_URL || !!PINATA_JWT || (!!PINATA_API_KEY && !!PINATA_API_SECRET);
+  if (IPFS_PROXY_URL) {
+    return !!PROXY_SECRET;
+  }
+  return !!PINATA_JWT || (!!PINATA_API_KEY && !!PINATA_API_SECRET);
+};
+
+const getProxySecret = (): string => {
+  if (!PROXY_SECRET) {
+    throw new Error("IPFS proxy signing secret is not configured");
+  }
+  return PROXY_SECRET;
 };
 
 const getURL = (hash: string): string => {
@@ -53,10 +66,17 @@ const uploadFile = async (
   try {
     let response;
     if (IPFS_PROXY_URL) {
+      const auth = await signProxyRequest({
+        secret: getProxySecret(),
+        method: "POST",
+        path: "/api/ipfs/pin-file",
+        unsignedBody: true,
+      });
       response = await axios.post(
         `${IPFS_PROXY_URL}/api/ipfs/pin-file`,
         formData,
         {
+          headers: auth.headers,
           timeout: 90000,
           maxBodyLength: Infinity,
           signal,
