@@ -12,7 +12,7 @@ Thank you for your interest in contributing to SpooVault! This project is a **mu
   - `src/context/Web3Context.tsx`: Manages multi-chain connections (Metamask for Avalanche, Freighter for Stellar).
   - `src/services/contract.service.ts`: Client service wrapper routing calls to either network.
   - `src/services/stellar.service.ts`: Stellar/Freighter wallet integration service.
-  - `src/services/ipfs.service.ts` & `src/services/keyInbox.service.ts`: IPFS storage services (supports proxy configuration).
+  - `src/services/ipfs.service.ts`, `src/services/ipfsGateway.ts` & `src/services/keyInbox.service.ts`: IPFS storage. Uploads use Pinata/proxy; downloads race Pinata, Infura, Cloudflare, and ipfs.io with a per-gateway circuit breaker.
 
 ---
 
