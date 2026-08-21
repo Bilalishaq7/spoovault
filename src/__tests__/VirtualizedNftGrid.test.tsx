@@ -2,7 +2,7 @@
 import type { ComponentProps } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
-import "@testing-library/jest-dom";
+import "@testing-library/jest-dom/vitest";
 import { VirtualizedNftGrid } from "../components/nft/VirtualizedNftGrid";
 import { TokenData } from "../services/contract.service";
 
@@ -54,7 +54,7 @@ const renderGrid = (
   );
 
 const getMountedTokenIds = () =>
-  screen.getAllByTestId("nft-card").map((card) => card.getAttribute("data-token-id"));
+  screen.getAllByTestId("nft-card").map((card: HTMLElement) => card.getAttribute("data-token-id"));
 
 describe("VirtualizedNftGrid", () => {
   beforeEach(() => {

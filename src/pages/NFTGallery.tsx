@@ -28,7 +28,7 @@ import {
   VaultData,
 } from "../services/contract.service";
 import { toast } from "react-hot-toast";
-import { fetchFromIPFS, formatDate, getIPFSURL, isValidAddress, shortenAddress } from "../utils/helpers";
+import { fetchFromIPFS, getIPFSURL, isValidAddress, shortenAddress } from "../utils/helpers";
 import { buttonClasses } from "../utils/buttonClasses";
 import { captureError } from "../services/telemetry.service";
 import { getExplorerBaseUrl as getSharedExplorerBaseUrl, getExplorerTokenUrl as getSharedExplorerTokenUrl } from "../utils/explorer";
