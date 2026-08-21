@@ -173,6 +173,7 @@ export const getContractId = (): string => {
 };
 
 
+
 const isConfigured = (): boolean => {
   return !!getContractId();
 };
