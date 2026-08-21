@@ -6,7 +6,7 @@ import {
   stellarService,
   type StellarWalletChangeEvent,
 } from "../services/stellar.service";
-import { sorobanEventWatcher } from "../services/sorobanEventWatcher.service";
+import { sorobanEventIndexer } from "../services/sorobanEventIndexer.service";
 
 const CONTRACT_ABI = [
   "function createVault(string name, string description, address[] guardians, uint256 approvalThreshold) external returns (uint256)",
@@ -259,7 +259,7 @@ export const Web3Provider = ({ children }: { children: ReactNode }) => {
       try {
         const address = await stellarService.connectWallet();
         setAccount(address);
-        sorobanEventWatcher.start(stellarService.getRpcUrl(), stellarService.getContractId());
+        sorobanEventIndexer.start(stellarService.getRpcUrl(), stellarService.getContractId());
         setProvider(null);
         setSigner(null);
         setChainId(null);
@@ -328,7 +328,7 @@ export const Web3Provider = ({ children }: { children: ReactNode }) => {
     setIsDisconnecting(true);
     if (ecosystem === "stellar") {
       stellarService.clear();
-      sorobanEventWatcher.stop();
+      sorobanEventIndexer.stop();
     }
     setProvider(null);
     setSigner(null);
