@@ -154,7 +154,6 @@ const Documents = () => {
   }, [account, isConnected, provider, signer, isFujiNetwork]);
 
   const loadData = async () => {
-    const previousDocs = [...documents];
     if (!account) {
       setVaults([]);
       setUploadableVaults([]);
@@ -198,7 +197,6 @@ const Documents = () => {
       setLatestRequestByDoc(requestMap);
       setReleaseConditionByDoc(releaseMap);
     } catch (error) {
-      setDocuments(previousDocs);
       console.error("Error loading documents:", error);
       captureError("documents.loadData", error, { account: account || "" });
       const message = error instanceof Error ? error.message : "Failed to load documents";
