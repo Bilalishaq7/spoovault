@@ -39,6 +39,11 @@ jobs:
       - name: Compile Hardhat EVM contracts
         run: npx hardhat compile --config hardhat.config.cjs
 
+      # playwright-core ships no browser binaries; synpress's cache build and
+      # the Playwright suite both need chromium present on the runner.
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
       - name: Build MetaMask browser cache (Synpress)
         run: HEADLESS=true npx synpress e2e/wallet-setup/spoovault.setup.ts
 
@@ -89,10 +94,10 @@ jobs:
         with:
           node-version: "22"
 
+      # The Stellar CLI is not published to npm; the docs-recommended way to
+      # get it in GitHub Actions is the official stellar/stellar-cli action.
       - name: Install stellar CLI
-        run: |
-          npm install -g @stellar/stellar-cli
-          echo "$(npm config get prefix)/bin" >> "$GITHUB_PATH"
+        uses: stellar/stellar-cli@v27.1.0
 
       - name: Start Soroban standalone network
         run: docker run -d --name soroban -p 8000:8000 stellar/quickstart standalone
