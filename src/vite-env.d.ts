@@ -12,6 +12,8 @@ interface ImportMetaEnv {
   readonly VITE_IPFS_FALLBACK_GATEWAYS?: string;
   readonly VITE_IPFS_GATEWAY_TIMEOUT_MS?: string;
   readonly VITE_IPFS_API_URL?: string;
+  readonly VITE_IPFS_PROXY_URL?: string;
+  readonly VITE_SPOOVUALT_PROXY_SECRET?: string;
   readonly VITE_LOG_CHUNK_SIZE?: string;
   readonly VITE_CONTRACT_DEPLOY_BLOCK?: string;
 }
