@@ -1,4 +1,8 @@
 #![no_std]
+// Soroban SDK macros emit `cfg(testutils)` which newer rustc check-cfg flags.
+#![allow(unexpected_cfgs)]
+// Public contract entrypoints intentionally take many args (env + auth + payload).
+#![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Env, String, Vec,
 };
@@ -649,7 +653,7 @@ impl SpooVaultStellar {
         assert!(vault.creator == owner, "Only creator can configure release");
         assert!(vault.is_active, "Vault not active");
         assert!(
-            inactivity_period >= 24 * 60 * 60 && inactivity_period <= 365 * 24 * 60 * 60,
+            (24 * 60 * 60..=365 * 24 * 60 * 60).contains(&inactivity_period),
             "Inactivity period must be between 1 and 365 days"
         );
 
@@ -789,4 +793,5 @@ impl SpooVaultStellar {
     }
 }
 
+#[cfg(test)]
 mod test;

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./ISpooVault.sol";
 
 /**
@@ -11,7 +12,7 @@ import "./ISpooVault.sol";
  *      document access delegations through a standardized, ERC-165 discoverable
  *      interface.
  */
-contract SpooVault is ERC721, ISpooVault {
+contract SpooVault is ERC721, ReentrancyGuard, ISpooVault {
     uint256 private _tokenIdCounter;
     uint256 private _vaultIdCounter;
     uint256 private _documentIdCounter;
