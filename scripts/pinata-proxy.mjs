@@ -22,23 +22,16 @@
  *   functions/index.js (created separately)
  */
 
+import { Readable } from "node:stream";
+
 // Check for required dependencies
-let express, multer, fetch, cors;
+let express, cors;
 try {
   const expressModule = await import("express");
   express = expressModule.default;
 } catch {
   console.error(
-    "❌ 'express' is not installed. Run:\n   npm install --save-dev express multer cors\n"
-  );
-  process.exit(1);
-}
-try {
-  const multerModule = await import("multer");
-  multer = multerModule.default;
-} catch {
-  console.error(
-    "❌ 'multer' is not installed. Run:\n   npm install --save-dev multer\n"
+    "❌ 'express' is not installed. Run:\n   npm install --save-dev express cors\n"
   );
   process.exit(1);
 }
@@ -71,7 +64,7 @@ const buildPinataHeaders = (includeContentType = false) => {
     headers["Authorization"] = `Bearer ${PINATA_JWT}`;
   } else {
     headers["pinata_api_key"] = PINATA_API_KEY;
-    headers["pinata_api_secret"] = PINATA_API_SECRET;
+    headers["pinata_secret_api_key"] = PINATA_API_SECRET;
   }
   if (includeContentType) {
     headers["Content-Type"] = "application/json";
@@ -81,42 +74,36 @@ const buildPinataHeaders = (includeContentType = false) => {
 
 const app = express();
 app.use(cors({ origin: "*" }));
-app.use(express.json({ limit: "50mb" }));
-
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
 
 /**
  * POST /api/ipfs/pin-file
- * Accepts multipart/form-data with:
- *   - file: the file to pin
- *   - pinataMetadata (optional): JSON string with {name, keyvalues}
+ *
+ * Transparent multipart passthrough to Pinata so multi-GB streaming uploads
+ * are never buffered in proxy memory (unlike multer.memoryStorage).
  */
-app.post("/api/ipfs/pin-file", upload.single("file"), async (req, res) => {
+app.post("/api/ipfs/pin-file", async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file provided" });
-    }
-
-    const { default: FormData } = await import("form-data");
-    const formData = new FormData();
-    formData.append("file", req.file.buffer, {
-      filename: req.file.originalname || "file",
-      contentType: req.file.mimetype || "application/octet-stream",
-    });
-
-    if (req.body.pinataMetadata) {
-      formData.append("pinataMetadata", req.body.pinataMetadata);
-    }
-    if (req.body.pinataOptions) {
-      formData.append("pinataOptions", req.body.pinataOptions);
+    const contentType = req.headers["content-type"];
+    if (!contentType || !String(contentType).includes("multipart/form-data")) {
+      return res.status(400).json({
+        error: 'Expected multipart/form-data with a "file" field',
+      });
     }
 
     const headers = buildPinataHeaders();
-    Object.assign(headers, formData.getHeaders());
+    headers["content-type"] = contentType;
+    if (req.headers["content-length"]) {
+      headers["content-length"] = req.headers["content-length"];
+    }
 
     const response = await globalThis.fetch(
       "https://api.pinata.cloud/pinning/pinFileToIPFS",
-      { method: "POST", headers, body: formData }
+      {
+        method: "POST",
+        headers,
+        body: Readable.toWeb(req),
+        duplex: "half",
+      }
     );
 
     const data = await response.json();
@@ -136,7 +123,7 @@ app.post("/api/ipfs/pin-file", upload.single("file"), async (req, res) => {
  *   - pinataContent: the object to pin
  *   - pinataMetadata (optional): {name, keyvalues}
  */
-app.post("/api/ipfs/pin-json", async (req, res) => {
+app.post("/api/ipfs/pin-json", express.json({ limit: "50mb" }), async (req, res) => {
   try {
     const { pinataContent, pinataMetadata, pinataOptions } = req.body;
     if (!pinataContent) {
@@ -195,7 +182,7 @@ app.get("/health", (_req, res) => {
 app.listen(PORT, () => {
   console.log(`\n✅ Pinata proxy running at http://localhost:${PORT}`);
   console.log("   Endpoints:");
-  console.log("   POST /api/ipfs/pin-file");
+  console.log("   POST /api/ipfs/pin-file (streaming passthrough)");
   console.log("   POST /api/ipfs/pin-json");
   console.log("   GET  /api/ipfs/pin-list");
   console.log("   GET  /health\n");
