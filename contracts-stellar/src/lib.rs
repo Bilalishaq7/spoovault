@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contractimpl, contracttype, Address, Env, IntoVal, String, Symbol, Val, Vec,
+    contract, contractimpl, contracttype, Address, Env, IntoVal, Map, String, Symbol, Val, Vec,
 };
 
 /// Ledger constants for TTL extension thresholds and bump amounts (~5s per ledger)
@@ -440,6 +440,7 @@ impl SpooVaultStellar {
     }
 
     /// Add a document metadata and storage hash
+    #[allow(clippy::too_many_arguments)]
     pub fn add_document(
         env: Env,
         uploader: Address,
@@ -464,7 +465,7 @@ impl SpooVaultStellar {
             Self::is_guardian_in_vault(&record.vault, &uploader),
             "Only guardians can upload documents"
         );
-        assert!(ipfs_hash.len() > 0, "IPFS hash required");
+        assert!(!ipfs_hash.is_empty(), "IPFS hash required");
         assert!(
             guardians_list.len() == shares.len(),
             "Guardians list and shares count mismatch"
@@ -627,14 +628,13 @@ impl SpooVaultStellar {
 
         if request.approved_by.len() >= record.vault.approval_threshold {
             request.status = RequestStatus::Approved;
-            let acc_key = DataKey::HasAccess(request.document_id, request.requester.clone());
-            let lvl_key = DataKey::AccessLvl(request.document_id, request.requester.clone());
-            env.storage().persistent().set(&acc_key, &true);
-            env.storage().persistent().set(&lvl_key, &doc.required_access);
-            Self::bump_persistent(&env, &acc_key);
-            Self::bump_persistent(&env, &lvl_key);
+            // Grant access at the document's required level, packed into the
+            // single DocumentRecord key (replacing the old HasAccess/AccessLvl keys).
+            doc_record
+                .access
+                .set(request.requester.clone(), doc_record.document.required_access);
 
-            let registry_key = DataKey::AccessRegistry(doc.vault_id);
+            let registry_key = DataKey::AccessRegistry(doc_record.document.vault_id);
             if let Some(registry) = env.storage().persistent().get::<_, Address>(&registry_key) {
                 Self::bump_persistent(&env, &registry_key);
                 Self::notify_access_registry(
@@ -697,7 +697,7 @@ impl SpooVaultStellar {
         );
         assert!(record.vault.is_active, "Vault not active");
         assert!(
-            inactivity_period >= 24 * 60 * 60 && inactivity_period <= 365 * 24 * 60 * 60,
+            (24 * 60 * 60..=365 * 24 * 60 * 60).contains(&inactivity_period),
             "Inactivity period must be between 1 and 365 days"
         );
 
@@ -739,13 +739,16 @@ impl SpooVaultStellar {
         owner.require_auth();
         Self::bump_instance(&env);
 
-        let vault_key = DataKey::Vault(vault_id);
-        let vault: Vault = env
+        let vault_key = DataKey::VaultRecord(vault_id);
+        let record: VaultRecord = env
             .storage()
             .persistent()
             .get(&vault_key)
             .expect("Vault not found");
-        assert!(vault.creator == owner, "Only creator can set access registry");
+        assert!(
+            record.vault.creator == owner,
+            "Only creator can set access registry"
+        );
 
         let registry_key = DataKey::AccessRegistry(vault_id);
         env.storage().persistent().set(&registry_key, &registry);

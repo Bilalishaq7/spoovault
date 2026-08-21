@@ -145,11 +145,11 @@ fn test_create_vault_and_get_vault() {
     assert_eq!(vault.id, 1);
     assert_eq!(vault.creator, creator);
     assert_eq!(vault.approval_threshold, 2);
-    assert_eq!(vault.is_active, true);
+    assert!(vault.is_active);
 
     let invites_g1 = client.get_invites(&g1);
     assert_eq!(invites_g1.len(), 1);
-    assert_eq!(invites_g1.get(0).unwrap().accepted, false);
+    assert!(!invites_g1.get(0).unwrap().accepted);
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn test_accept_guardian_invite() {
     assert!(vault.guardians.contains(&g1));
 
     let invites = client.get_invites(&g1);
-    assert_eq!(invites.get(0).unwrap().accepted, true);
+    assert!(invites.get(0).unwrap().accepted);
 }
 
 #[test]
@@ -282,7 +282,7 @@ fn test_prove_life_and_emergency_mode() {
 
     client.set_emergency_mode(&creator, &vault_id, &true);
     let state = client.get_release_state(&vault_id).unwrap();
-    assert_eq!(state.emergency_mode, true);
+    assert!(state.emergency_mode);
 
     client.prove_life(&creator, &vault_id);
     client.configure_vault_release(&creator, &vault_id, &(60 * 24 * 60 * 60));
