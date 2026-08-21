@@ -26,6 +26,7 @@ const resetIpfsEnv = (): void => {
   delete testEnv().VITE_PINATA_API_KEY;
   delete testEnv().VITE_PINATA_API_SECRET;
   delete testEnv().VITE_IPFS_PROXY_URL;
+  delete testEnv().VITE_SPOOVUALT_PROXY_SECRET;
 };
 
 const loadService = async (): Promise<KeyInboxModule> => {
@@ -138,8 +139,9 @@ describe("KeyInboxService (IPFS key envelope privacy)", () => {
       expect(keyInboxService.isConfigured()).toBe(true);
     });
 
-    it("is true with a proxy URL", async () => {
+    it("is true with a proxy URL and secret", async () => {
       testEnv().VITE_IPFS_PROXY_URL = "https://proxy.example.com";
+      testEnv().VITE_SPOOVUALT_PROXY_SECRET = "test-secret";
       const { keyInboxService } = await loadService();
       expect(keyInboxService.isConfigured()).toBe(true);
     });
@@ -218,16 +220,18 @@ describe("KeyInboxService (IPFS key envelope privacy)", () => {
       expect(config.headers.Authorization).toBeUndefined();
     });
 
-    it("posts to the proxy endpoint without credentials when configured", async () => {
+    it("posts to the proxy endpoint with signature when configured", async () => {
       testEnv().VITE_IPFS_PROXY_URL = "https://proxy.example.com";
+      testEnv().VITE_SPOOVUALT_PROXY_SECRET = "test-secret";
       postMock.mockResolvedValueOnce({ data: { IpfsHash: "QmProxyHash" } });
       const { keyInboxService } = await loadService();
 
       const result = await keyInboxService.sendKeyEnvelope(makePayload());
 
       expect(result).toBe("QmProxyHash");
-      const [url, body, config] = postMock.mock.calls[0];
+      const [url, rawBody, config] = postMock.mock.calls[0];
       expect(url).toBe("https://proxy.example.com/api/ipfs/pin-json");
+      const body = typeof rawBody === "string" ? JSON.parse(rawBody) : rawBody;
       expect(body.pinataMetadata.keyvalues.beneficiary).toBe(
         sha256(BENEFICIARY.toLowerCase()),
       );
@@ -235,7 +239,7 @@ describe("KeyInboxService (IPFS key envelope privacy)", () => {
         sha256(ISSUER.toLowerCase()),
       );
       expect(config.headers["Content-Type"]).toBe("application/json");
-      expect(JSON.stringify(config.headers)).not.toContain("Authorization");
+      expect(config.headers["X-SpooVault-Signature"]).toBeDefined();
     });
 
     it("rejects when the pin response has no IpfsHash", async () => {
@@ -541,6 +545,7 @@ describe("KeyInboxService (IPFS key envelope privacy)", () => {
 
     it("lists pins through the proxy endpoint when proxy is configured", async () => {
       testEnv().VITE_IPFS_PROXY_URL = "https://proxy.example.com";
+      testEnv().VITE_SPOOVUALT_PROXY_SECRET = "test-secret";
       let listCalls = 0;
       getMock.mockImplementation(async (url: string) => {
         if (isListUrl(url)) {
@@ -559,9 +564,11 @@ describe("KeyInboxService (IPFS key envelope privacy)", () => {
 
       expect(envelopes).toHaveLength(1);
       expect(getMock).toHaveBeenCalledWith(
-        "https://proxy.example.com/api/ipfs/pin-list",
+        "https://proxy.example.com/api/ipfs/pin-list?status=pinned&pageLimit=100&pageOffset=0",
         expect.objectContaining({
-          params: expect.objectContaining({ status: "pinned", pageOffset: 0 }),
+          headers: expect.objectContaining({
+            "X-SpooVault-Signature": expect.any(String),
+          }),
         }),
       );
     });
