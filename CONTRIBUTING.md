@@ -57,7 +57,11 @@ Thank you for your interest in contributing to SpooVault! This project is a **mu
   npm run deploy:contract
   ```
 
-### 2. Stellar (Rust + Soroban)
+### 2. Security Analysis (Slither & Mythril)
+
+CI runs [Slither](https://github.com/crytic/slither) and [Mythril](https://github.com/Consensys/mythril) against the Solidity contracts on every pull request. See the "Automated Security Analysis" section of [SECURITY.md](./SECURITY.md) for the exact commands, the current findings policy, and how to reproduce a scan locally before pushing.
+
+### 3. Stellar (Rust + Soroban)
 
 - Navigate to the contract folder:
   ```bash
