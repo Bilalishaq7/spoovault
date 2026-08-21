@@ -798,16 +798,15 @@ contract SpooVault is ERC721 {
     }
 
     /**
-     * @dev Burn NFT access token and invalidate all prior grants for owner+vault in O(1).
+     * @dev Burn NFT access token. Grant invalidation is handled centrally in
+     * _update, which bumps the vault access version whenever the burner's
+     * balance for the vault drops to zero.
      */
     function burnAccessToken(uint256 tokenId) external {
         address owner = ownerOf(tokenId);
         if (!_isTokenOwnerOrApproved(owner, msg.sender, tokenId)) {
             revert NotOwnerOrApproved();
         }
-
-        uint256 vaultId = tokenVaultMapping[tokenId];
-        _vaultAccessVersion[vaultId][owner] = _currentAccessVersion(vaultId, owner) + 1;
 
         _burn(tokenId);
 
@@ -929,6 +928,14 @@ contract SpooVault is ERC721 {
             if (_vaultAccessVersion[vaultId][to] == 0) {
                 _vaultAccessVersion[vaultId][to] = 1;
             }
+        }
+
+        // Evaluated after all balance mutations so self-transfers never
+        // transiently read a zero balance. When the sender's balance for this
+        // vault drops to zero, every prior document grant they hold is
+        // invalidated; re-acquiring a pass requires fresh guardian approval.
+        if (from != address(0) && vaultId != 0 && _ownedVaultTokenBalance[from][vaultId] == 0) {
+            _vaultAccessVersion[vaultId][from] += 1;
         }
 
         return from;
