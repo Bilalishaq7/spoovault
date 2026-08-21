@@ -35,8 +35,8 @@ import {
 import { buttonClasses } from "../utils/buttonClasses";
 import {
   decryptData,
+  fetchFromIPFS,
   formatDate,
-  getIPFSURL,
   isValidAddress,
   shortenAddress,
 } from "../utils/helpers";
@@ -580,13 +580,7 @@ const AccessCenter = () => {
       throw new Error("Encryption key not found. Import the key package first.");
     }
 
-    const response = await fetch(getIPFSURL(doc.ipfsHash));
-    if (!response.ok) {
-      throw new Error("Failed to download encrypted file");
-    }
-    if (!response.body) {
-      throw new Error("IPFS response body is not readable as a stream");
-    }
+    const response = await fetchFromIPFS(doc.ipfsHash);
 
     const { isStreaming, stream } = await detectStreamingCiphertext(response.body);
     const metadata = decryptMetadata(doc);

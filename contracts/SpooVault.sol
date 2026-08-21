@@ -12,7 +12,7 @@ import "./ISpooVault.sol";
  *      document access delegations through a standardized, ERC-165 discoverable
  *      interface.
  */
-contract SpooVault is ERC721, ReentrancyGuard, ISpooVault {
+contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     uint256 private _tokenIdCounter;
     uint256 private _vaultIdCounter;
     uint256 private _documentIdCounter;
@@ -413,6 +413,7 @@ contract SpooVault is ERC721, ReentrancyGuard, ISpooVault {
             revert InvalidInactivityPeriod();
         }
 
+        _vaultReleaseStates[vaultId].lastProofOfLife = block.timestamp;
         _vaultReleaseStates[vaultId].inactivityPeriod = inactivityPeriod;
         emit VaultReleaseConfigured(vaultId, inactivityPeriod);
     }
