@@ -59,8 +59,10 @@ SpooVault is an enterprise-grade document custody and secret sharing application
 ## 4. IPFS Storage, Gateway Pool & Circuit Breaker
 
 To prevent client-side leaks of Pinata API credentials:
-- Production **uploads** route through a lightweight proxy script (`scripts/pinata-proxy.mjs`).
-- Upload payloads are authenticated using ephemeral tokens or scoped proxy headers.
+- Production pin requests route through `scripts/pinata-proxy.mjs`. The Pinata JWT stays on the server.
+- CORS is restricted to `SPOOVUALT_ALLOWED_ORIGINS` (local Vite URLs by default). Wildcard `Access-Control-Allow-Origin: *` is not used.
+- Every `/api/ipfs/*` pin or list call must present `X-SpooVault-Signature: t=<unix>,v1=<hmac-sha256-hex>`. The HMAC covers timestamp, method, path, and body hash. Unsigned or cross-origin callers receive **403 Forbidden**.
+- The frontend signs with `VITE_SPOOVUALT_PROXY_SECRET` (a dedicated HMAC key, not the Pinata JWT). See `scripts/lib/ipfsProxyGuard.mjs`.
 
 Document **downloads** no longer depend on a single Pinata URL. `src/services/ipfsGateway.ts` races a public gateway pool and fails over automatically when the primary gateway rate-limits or stalls:
 

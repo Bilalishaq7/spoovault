@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Pinata proxy HMAC auth and CORS lock-down (Issue #27)**:
+  - Restricted `scripts/pinata-proxy.mjs` CORS to `SPOOVUALT_ALLOWED_ORIGINS` instead of `Access-Control-Allow-Origin: *`.
+  - Required `X-SpooVault-Signature` HMAC verification on pin/list routes so unsigned external requests are rejected with 403 Forbidden, keeping the Pinata JWT off the public internet.
 - **Multi-gateway IPFS download circuit breaker (Issue #26)**:
   - Replaced single-gateway Pinata document fetches with a race across Pinata, Infura IPFS, Cloudflare IPFS, and ipfs.io.
   - Per-gateway circuit breaker skips endpoints that return HTTP 429, time out, or fail with 401/403/5xx until cooldown elapses, so public Pinata rate limits no longer crash document loading.
