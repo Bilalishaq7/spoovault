@@ -11,3 +11,6 @@ format: text
 maxFuzzSpaceSize: 100000
 # Stop early if a property is violated.
 stopOnFail: true
+cryticArgs:
+  - "--solc-remaps"
+  - "@openzeppelin/=/src/node_modules/@openzeppelin/"
