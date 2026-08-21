@@ -17,9 +17,9 @@ export function canonicalize(input: {
 export function hmacSha256Hex(secret: string, message: string): Promise<string>;
 export function formatSignatureHeader(timestamp: number, hex: string): string;
 export function parseSignatureHeader(
-  value: string | undefined | null
+  value: unknown
 ): { timestamp: number; v1: string } | null;
-export function timingSafeEqualHex(left: string, right: string): boolean;
+export function timingSafeEqualHex(left: unknown, right: unknown): boolean;
 export function resolveBodyHash(input?: {
   body?: string;
   unsignedBody?: boolean;
