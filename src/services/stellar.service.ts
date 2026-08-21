@@ -1125,6 +1125,7 @@ export const stellarService = {
   registerCrossChainIdentity,
   resolveEvmToStellar,
   resolveStellarToEvm,
+  resolveEvmToPublicKey,
   isConfigured,
   setMockStellarSdk,
   setMockFreighter,
