@@ -39,29 +39,28 @@ jobs:
       - name: Compile Hardhat EVM contracts
         run: npx hardhat compile --config hardhat.config.cjs
 
-      - name: Build MetaMask browser cache (Synpress)
-        run: HEADLESS=true npx synpress e2e/wallet-setup/spoovault.setup.ts
-
-      - name: Run E2E suite (Anvil + SpooVault + MetaMask)
+      - name: Start local Anvil RPC node
         run: |
-          set -euo pipefail
           nohup anvil \
             --chain-id 43113 \
             --mnemonic "test test test test test test test test test test test junk" \
             --accounts 10 \
             --balance 10000 \
             --silent > /tmp/anvil.log 2>&1 &
-          ANVIL_PID=$!
           sleep 5
+
+      - name: Build MetaMask browser cache (Synpress)
+        run: HEADLESS=true npx synpress e2e/wallet-setup/spoovault.setup.ts
+
+      - name: Run E2E suite (Anvil + SpooVault + MetaMask)
+        run: |
+          set -euo pipefail
           node e2e/scripts/deploy-anvil.mjs
           set -a
           . ./e2e/.env.e2e
           set +a
           npm run build
           HEADLESS=true npx playwright test --reporter=line
-          TEST_EXIT=$?
-          kill "$ANVIL_PID" || true
-          exit "$TEST_EXIT"
 
       - name: Upload E2E report & artifacts
         if: always()

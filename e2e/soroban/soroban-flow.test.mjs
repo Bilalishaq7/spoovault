@@ -35,7 +35,10 @@ const NETWORK = "spoovault-e2e";
 
 function runStellar(args, opts = {}) {
   try {
-    return execFileSync("stellar", args, { encoding: "utf8" }).trim();
+    return execFileSync("stellar", args, {
+      encoding: "utf8",
+      cwd: opts.cwd || STELLAR_CRATE,
+    }).trim();
   } catch (err) {
     if (opts.allowFail) return "";
     throw new Error(
