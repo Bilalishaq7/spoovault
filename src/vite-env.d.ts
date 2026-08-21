@@ -9,6 +9,8 @@ interface ImportMetaEnv {
   readonly VITE_CHAIN_ID?: string;
   readonly VITE_CHAIN_NAME?: string;
   readonly VITE_IPFS_GATEWAY?: string;
+  readonly VITE_IPFS_FALLBACK_GATEWAYS?: string;
+  readonly VITE_IPFS_GATEWAY_TIMEOUT_MS?: string;
   readonly VITE_IPFS_API_URL?: string;
   readonly VITE_IPFS_PROXY_URL?: string;
   readonly VITE_SPOOVUALT_PROXY_SECRET?: string;

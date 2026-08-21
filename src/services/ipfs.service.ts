@@ -1,4 +1,5 @@
 import axios from "axios";
+import { ipfsGateway } from "./ipfsGateway";
 import { signProxyRequest } from "../utils/ipfsProxySignature";
 
 const PINATA_API_URL =
@@ -6,8 +7,6 @@ const PINATA_API_URL =
 const PINATA_JWT = import.meta.env.VITE_PINATA_JWT;
 const PINATA_API_KEY = import.meta.env.VITE_PINATA_API_KEY;
 const PINATA_API_SECRET = import.meta.env.VITE_PINATA_API_SECRET;
-const IPFS_GATEWAY =
-  import.meta.env.VITE_IPFS_GATEWAY || "https://gateway.pinata.cloud/ipfs/";
 
 const IPFS_PROXY_URL =
   (import.meta.env.VITE_IPFS_PROXY_URL as string | undefined)?.trim() || "";
@@ -28,9 +27,12 @@ const getProxySecret = (): string => {
   return PROXY_SECRET;
 };
 
-const getURL = (hash: string): string => {
-  return `${IPFS_GATEWAY}${hash}`;
-};
+const getURL = (hash: string): string => ipfsGateway.getURL(hash);
+
+const fetchFile = (hash: string, init?: RequestInit): Promise<Response> =>
+  ipfsGateway.fetchFile(hash, init);
+
+const getGatewayPool = (): string[] => ipfsGateway.getGatewayPool();
 
 const buildAuthHeaders = (): Record<string, string> => {
   if (PINATA_JWT) {
@@ -117,6 +119,8 @@ const uploadFile = async (
 export const ipfsService = {
   isConfigured,
   getURL,
+  fetchFile,
+  getGatewayPool,
   uploadFile,
 };
 
