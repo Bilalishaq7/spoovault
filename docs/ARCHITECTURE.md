@@ -56,11 +56,22 @@ SpooVault is an enterprise-grade document custody and secret sharing application
 
 ---
 
-## 4. IPFS Storage & Proxy Isolation
+## 4. IPFS Storage, Gateway Pool & Circuit Breaker
 
 To prevent client-side leaks of Pinata API credentials:
-- Production requests route through a lightweight proxy script (`scripts/pinata-proxy.mjs`).
+- Production **uploads** route through a lightweight proxy script (`scripts/pinata-proxy.mjs`).
 - Upload payloads are authenticated using ephemeral tokens or scoped proxy headers.
+
+Document **downloads** no longer depend on a single Pinata URL. `src/services/ipfsGateway.ts` races a public gateway pool and fails over automatically when the primary gateway rate-limits or stalls:
+
+1. Pinata (`VITE_IPFS_GATEWAY`, default `https://gateway.pinata.cloud/ipfs/`)
+2. Infura IPFS (`https://ipfs.infura.io/ipfs/`)
+3. Cloudflare IPFS (`https://cloudflare-ipfs.com/ipfs/`)
+4. IPFS.io (`https://ipfs.io/ipfs/`)
+
+Each gateway has a circuit breaker. HTTP 429, timeouts, 401/403, and 5xx responses open that gateway's circuit for 30 seconds so a rate-limited Pinata endpoint is skipped on the next fetch. Healthy (or half-open) gateways are raced in parallel; the first 2xx wins and remaining in-flight requests are aborted.
+
+Callers use `ipfsService.fetchFile` / `fetchFromIPFS` (Documents, Access Center, and NFT `ipfs://` metadata). `getIPFSURL` remains a deterministic primary-gateway URL for display and copy. Extra download gateways can be appended with `VITE_IPFS_FALLBACK_GATEWAYS`.
 
 ---
 
