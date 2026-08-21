@@ -1,4 +1,7 @@
 #![no_std]
+
+pub mod identity_registry;
+
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contractimpl, contracttype, Address, Env, IntoVal, String, Symbol, Val, Vec,
