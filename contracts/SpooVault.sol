@@ -397,6 +397,7 @@ contract SpooVault is ERC721 {
             revert InvalidInactivityPeriod();
         }
 
+        _vaultReleaseStates[vaultId].lastProofOfLife = block.timestamp;
         _vaultReleaseStates[vaultId].inactivityPeriod = inactivityPeriod;
         emit VaultReleaseConfigured(vaultId, inactivityPeriod);
     }
