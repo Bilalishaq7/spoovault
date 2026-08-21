@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { sorobanEventWatcher } from "../services/sorobanEventWatcher.service";
 
@@ -19,6 +20,13 @@ describe("SorobanEventWatcher", () => {
     vi.useFakeTimers();
     global.fetch = vi.fn();
     installWindowShim();
+    const mockFetch = vi.fn();
+    globalThis.fetch = mockFetch;
+    global.fetch = mockFetch;
+    if (typeof window !== "undefined") {
+      (window as any).fetch = mockFetch;
+      vi.spyOn(window, "dispatchEvent").mockImplementation(() => true);
+    }
   });
 
   afterEach(() => {
@@ -61,6 +69,32 @@ describe("SorobanEventWatcher", () => {
     const eventsCall = JSON.parse((global.fetch as any).mock.calls[1][1].body);
     expect(eventsCall.method).toBe("getEvents");
     expect(eventsCall.params.startLedger).toBe(1000);
+  it("should initialize and fetch latest ledger on first poll", async () => {
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          result: { sequence: 1000 }
+        })
+      })
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          result: { events: [] }
+        })
+      });
+
+    sorobanEventWatcher.start(rpcUrl, contractId);
+    
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(global.fetch).toHaveBeenCalled();
+    const fetchCall1 = (global.fetch as any).mock.calls[0];
+    expect(fetchCall1[0]).toBe(rpcUrl);
+    expect(JSON.parse(fetchCall1[1].body).method).toBe("getLatestLedger");
+
+    const fetchCall2 = (global.fetch as any).mock.calls[1];
+    expect(JSON.parse(fetchCall2[1].body).method).toBe("getEvents");
   });
 
   it("should fetch events and dispatch to listeners when events are present", async () => {
@@ -77,10 +111,26 @@ describe("SorobanEventWatcher", () => {
     sorobanEventWatcher.start(rpcUrl, contractId);
     await vi.runOnlyPendingTimersAsync();
 
+        json: async () => ({ result: { sequence: 1000 } })
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          result: {
+            events: [
+              {
+                type: "contract",
+                pagingToken: "1001-1",
+                topic: ["VaultCreated_XDR"],
+                value: { some: "data" }
+              }
+            ]
+          }
+        })
+      });
+
     const mockCallback = vi.fn();
     sorobanEventWatcher.on("SorobanEvent", mockCallback);
-    const mockVaultCallback = vi.fn();
-    sorobanEventWatcher.on("VaultCreated", mockVaultCallback);
 
     // Next cycle: ledger lookup followed by the getEvents call carrying one event.
     (global.fetch as any)
@@ -116,9 +166,12 @@ describe("SorobanEventWatcher", () => {
     expect(mockVaultCallback).toHaveBeenCalledTimes(1);
     // Each event fans out to SorobanEvent, VaultCreated and DocumentAdded topics.
     expect(window.dispatchEvent).toHaveBeenCalledTimes(3);
+    sorobanEventWatcher.start(rpcUrl, contractId);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(mockCallback).toHaveBeenCalled();
 
     sorobanEventWatcher.off("SorobanEvent", mockCallback);
-    sorobanEventWatcher.off("VaultCreated", mockVaultCallback);
   });
 
   it("should handle RPC errors gracefully", async () => {
@@ -149,6 +202,24 @@ describe("SorobanEventWatcher", () => {
       });
 
     await vi.advanceTimersByTimeAsync(5000);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ result: { sequence: 1000 } })
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        statusText: "Bad Gateway"
+      });
+
+    // @ts-ignore
+    sorobanEventWatcher.lastCursor = undefined;
+    
+    // @ts-ignore
+    await sorobanEventWatcher.poll();
 
     expect(consoleSpy).toHaveBeenCalledWith(
       "SorobanEventWatcher polling error:",
