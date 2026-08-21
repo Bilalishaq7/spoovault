@@ -134,7 +134,7 @@ describe("createIpfsGatewayClient race fetch and circuit breaker", () => {
   });
 
   it("failovers when the primary gateway times out", async () => {
-    const fetchFn: FetchFn = (url, init) => {
+    const fetchFn: FetchFn = async (url, init) => {
       if (url.startsWith(PINATA)) return hangingFetch(5_000)(url, init);
       if (url.startsWith(IPFS_IO)) return jsonResponse(200, "ipfs-io-body");
       return jsonResponse(503);
