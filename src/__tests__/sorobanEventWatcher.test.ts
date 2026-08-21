@@ -1,6 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { sorobanEventWatcher } from "../services/sorobanEventWatcher.service";
 
+// Minimal browser shim: the watcher targets window timers/dispatch, while the
+// suite runs in vitest's node environment.
+const installWindowShim = () => {
+  (globalThis as any).window = {
+    setTimeout: (fn: any, ms?: number) => setTimeout(fn, ms),
+    clearTimeout: (id: any) => clearTimeout(id),
+    dispatchEvent: vi.fn(() => true),
+  };
+};
+
 describe("SorobanEventWatcher", () => {
   const rpcUrl = "https://mock.soroban.rpc";
   const contractId = "C123456789";
@@ -8,21 +18,19 @@ describe("SorobanEventWatcher", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     global.fetch = vi.fn();
-    // Spy on window.dispatchEvent
-    vi.spyOn(window, "dispatchEvent").mockImplementation(() => true);
+    installWindowShim();
   });
 
   afterEach(() => {
     sorobanEventWatcher.stop();
     vi.restoreAllMocks();
     vi.useRealTimers();
-    // Reset private state via fresh instance if needed, but since it's a singleton, 
-    // stopping it and clearing listeners is usually enough for tests.
-    // Clean up generic listeners:
+    // Reset singleton state between tests.
     // @ts-ignore
     sorobanEventWatcher.listeners = {};
     // @ts-ignore
     sorobanEventWatcher.lastCursor = undefined;
+    delete (globalThis as any).window;
   });
 
   it("should not fetch events if not started", async () => {
@@ -31,112 +39,120 @@ describe("SorobanEventWatcher", () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  it("should initialize and fetch latest ledger on first poll", async () => {
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        result: { sequence: 1000 }
+  it("should fetch latest ledger then events on the initial poll", async () => {
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ result: { sequence: 1000 } }),
       })
-    });
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ result: { events: [] } }),
+      });
 
     sorobanEventWatcher.start(rpcUrl, contractId);
-    
-    // Fast forward to trigger the initial fetch LatestLedger
     await vi.runOnlyPendingTimersAsync();
 
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    const fetchCall = (global.fetch as any).mock.calls[0];
-    expect(fetchCall[0]).toBe(rpcUrl);
-    expect(JSON.parse(fetchCall[1].body).method).toBe("getLatestLedger");
+    // Initial poll (ledger + events) plus the scheduled follow-up cycle whose
+    // un-mocked ledger probe fails silently and aborts the cycle.
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body).method).toBe("getLatestLedger");
+
+    const eventsCall = JSON.parse((global.fetch as any).mock.calls[1][1].body);
+    expect(eventsCall.method).toBe("getEvents");
+    expect(eventsCall.params.startLedger).toBe(1000);
   });
 
   it("should fetch events and dispatch to listeners when events are present", async () => {
-    // Mock getLatestLedger
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ result: { sequence: 1000 } })
-    });
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ result: { sequence: 1000 } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ result: { events: [] } }),
+      });
 
     sorobanEventWatcher.start(rpcUrl, contractId);
     await vi.runOnlyPendingTimersAsync();
-
-    // Now mock the getEvents response for the next poll
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        result: {
-          events: [
-            {
-              type: "contract",
-              pagingToken: "1001-1",
-              topic: ["VaultCreated_XDR"],
-              value: { some: "data" }
-            }
-          ]
-        }
-      })
-    });
 
     const mockCallback = vi.fn();
     sorobanEventWatcher.on("SorobanEvent", mockCallback);
     const mockVaultCallback = vi.fn();
     sorobanEventWatcher.on("VaultCreated", mockVaultCallback);
 
-    // Fast forward to next poll
+    // Next cycle: ledger lookup followed by the getEvents call carrying one event.
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ result: { sequence: 1000 } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          result: {
+            events: [
+              {
+                type: "contract",
+                pagingToken: "1001-1",
+                topic: ["VaultCreated_XDR"],
+                value: { some: "data" },
+              },
+            ],
+          },
+        }),
+      });
+
     await vi.advanceTimersByTimeAsync(5000);
 
-    expect(global.fetch).toHaveBeenCalledTimes(2);
-    expect(JSON.parse((global.fetch as any).mock.calls[1][1].body).method).toBe("getEvents");
-    
+    // 2 initial + 1 silent probe + ledger + events for the advanced cycle.
+    expect(global.fetch).toHaveBeenCalledTimes(5);
+    const secondEventsCall = JSON.parse((global.fetch as any).mock.calls[4][1].body);
+    expect(secondEventsCall.method).toBe("getEvents");
+    expect(secondEventsCall.params.startLedger).toBe(1000);
+
     expect(mockCallback).toHaveBeenCalledTimes(1);
     expect(mockVaultCallback).toHaveBeenCalledTimes(1);
-    expect(window.dispatchEvent).toHaveBeenCalledTimes(3); // SorobanEvent, VaultCreated, DocumentAdded generic custom events
-    
+    // Each event fans out to SorobanEvent, VaultCreated and DocumentAdded topics.
+    expect(window.dispatchEvent).toHaveBeenCalledTimes(3);
+
     sorobanEventWatcher.off("SorobanEvent", mockCallback);
     sorobanEventWatcher.off("VaultCreated", mockVaultCallback);
   });
 
   it("should handle RPC errors gracefully", async () => {
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: false,
-      statusText: "Internal Server Error"
-    });
-
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    sorobanEventWatcher.start(rpcUrl, contractId);
-    // getLatestLedger fails and returns 0.
-    await vi.runOnlyPendingTimersAsync();
-
-    expect(consoleSpy).not.toHaveBeenCalled(); // getLatestLedger swallows error and returns 0
-
-    // advance to next poll (which won't happen because startLedger === 0 returns early)
-    await vi.advanceTimersByTimeAsync(5000);
-    
-    // Now simulate getLatestLedger succeeding, but getEvents failing
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ result: { sequence: 1000 } })
-    });
-    // @ts-ignore
-    sorobanEventWatcher.lastCursor = undefined;
-    // trigger a manual poll just to test the error block inside fetchEvents
-    // @ts-ignore
-    sorobanEventWatcher.lastCursor = "prev-cursor";
-    
+    // getLatestLedger failure is swallowed and yields ledger 0 -> silent abort.
     (global.fetch as any).mockResolvedValueOnce({
       ok: false,
-      statusText: "Bad Gateway"
+      statusText: "Internal Server Error",
     });
-    
-    // @ts-ignore
-    await sorobanEventWatcher.poll();
+
+    sorobanEventWatcher.start(rpcUrl, contractId);
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(consoleSpy).not.toHaveBeenCalled();
+    // Initial failed ledger + the scheduled cycle's silent probe.
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+
+    // Next cycle: ledger succeeds but getEvents fails -> poll() logs the error.
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ result: { sequence: 1000 } }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        statusText: "Bad Gateway",
+      });
+
+    await vi.advanceTimersByTimeAsync(5000);
 
     expect(consoleSpy).toHaveBeenCalledWith(
       "SorobanEventWatcher polling error:",
       expect.any(Error)
     );
-
-    consoleSpy.mockRestore();
   });
 });

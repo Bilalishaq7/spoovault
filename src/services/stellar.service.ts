@@ -1117,6 +1117,8 @@ export const stellarService = {
   resolveEvmToStellar,
   resolveStellarToEvm,
   resolveEvmToPublicKey,
+  getRpcUrl: (): string => sorobanRpcUrl,
+  getContractId,
   isConfigured,
   setMockStellarSdk,
   setMockFreighter,
