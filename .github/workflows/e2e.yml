@@ -40,7 +40,7 @@ jobs:
         run: npx hardhat compile --config hardhat.config.cjs
 
       - name: Build MetaMask browser cache (Synpress)
-        run: HEADLESS=true npx synpress e2e/wallet-setup/spoovault.setup.ts
+        run: HEADLESS=true npx synpress@4.1.2 e2e/wallet-setup
 
       - name: Run E2E suite (Anvil + SpooVault + MetaMask)
         run: |
@@ -91,8 +91,10 @@ jobs:
 
       - name: Install stellar CLI
         run: |
-          npm install -g @stellar/stellar-cli
-          echo "$(npm config get prefix)/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -y && sudo apt-get install -y libdbus-1-3 libudev1
+          curl -fsSL https://github.com/stellar/stellar-cli/raw/main/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          stellar --version
 
       - name: Start Soroban standalone network
         run: docker run -d --name soroban -p 8000:8000 stellar/quickstart standalone
