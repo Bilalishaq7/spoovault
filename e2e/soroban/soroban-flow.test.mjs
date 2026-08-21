@@ -18,7 +18,7 @@
  *   - Three funded identities supplied via env, or auto-generated + funded from
  *     the standalone network's friendbot.
  */
-import { test, beforeAll } from "node:test";
+import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
@@ -66,7 +66,7 @@ let guardian;
 let beneficiary;
 let contractId;
 
-beforeAll(async () => {
+before(async () => {
   ensureNetwork();
 
   // Identities: use provided funded secrets, else generate + fund from faucet.

@@ -29,6 +29,9 @@ export default defineConfig({
     video: "retain-on-failure",
     screenshot: "only-on-failure",
     actionTimeout: 30_000,
+    // CI runners (GitHub Actions) launch Chromium as root in a container, which
+    // requires --no-sandbox; harmless locally.
+    launchOptions: { args: ["--no-sandbox"] },
   },
   projects: [
     {
