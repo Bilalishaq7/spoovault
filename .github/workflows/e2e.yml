@@ -50,7 +50,12 @@ jobs:
           sleep 5
 
       - name: Build MetaMask browser cache (Synpress)
-        run: HEADLESS=true npx @synthetixio/synpress@4.1.2 e2e/wallet-setup
+        # Pinned below 4.1.2: that release bumped the bundled MetaMask to 13.13.1,
+        # which hangs on the post-import "Your wallet is ready!" onboarding overlay
+        # before Synpress's network-display readiness check
+        # (https://github.com/synpress-io/synpress/issues/1308). 4.1.1 bundles
+        # MetaMask 11.9.1, the last version without this regression.
+        run: HEADLESS=true npx @synthetixio/synpress@4.1.1 e2e/wallet-setup
 
       - name: Run E2E suite (Anvil + SpooVault + MetaMask)
         run: |
@@ -90,8 +95,10 @@ jobs:
 
       - name: Install stellar CLI
         run: |
-          npm install -g @stellar/stellar-cli
-          echo "$(npm config get prefix)/bin" >> "$GITHUB_PATH"
+          STELLAR_CLI_VERSION=27.1.0
+          curl -sL "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -o stellar-cli.tar.gz
+          tar -xzf stellar-cli.tar.gz
+          sudo mv stellar /usr/local/bin/stellar
           stellar --version
 
       - name: Start Soroban standalone network

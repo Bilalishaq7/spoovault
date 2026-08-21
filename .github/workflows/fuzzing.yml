@@ -26,7 +26,7 @@ jobs:
           docker run --rm \
             -v "$PWD":/src -w /src \
             trailofbits/echidna:v2.2.3 \
-            /src/fuzz/harness/SpooVaultFuzz.sol \
+            echidna /src/fuzz/harness/SpooVaultFuzz.sol \
             --contract SpooVaultFuzz \
             --config /src/fuzz/echidna/config.yaml \
             --test-mode property
@@ -52,7 +52,7 @@ jobs:
       - name: Run Medusa campaign
         run: |
           export PATH="$HOME/go/bin:$PATH"
-          medusa fuzz --config fuzz/medusa/medusa.toml
+          medusa fuzz --config fuzz/medusa/medusa.json
 
   soroban-fuzz:
     name: Soroban proptest (cargo-fuzz / proptest)
