@@ -64,6 +64,8 @@ VITE_AVALANCHE_RPC=https://api.avax-test.network/ext/bc/C/rpc
 VITE_CHAIN_ID=43113
 VITE_CHAIN_NAME=Avalanche Fuji Testnet
 VITE_IPFS_GATEWAY=https://gateway.pinata.cloud/ipfs/
+# Optional: extra download gateways (Pinata, Infura, Cloudflare, ipfs.io are already pooled)
+# VITE_IPFS_FALLBACK_GATEWAYS=
 ```
 
 ### 4. Run Development Server
@@ -80,6 +82,7 @@ npm run dev
 - **Hardhat EVM Contract Tests**: `npm run test:contracts`
 - **Stellar Soroban Tests**: `npm run test:stellar`
 - **TypeScript Verification**: `npx tsc --noEmit`
+- **Production Bundle Check**: `npx vite build` emits named `vendor-react`, `vendor-heroui`, `vendor-ethers`, and lazy `vendor-stellar` chunks so the entry JavaScript bundle stays below the initial-load budget.
 
 ---
 

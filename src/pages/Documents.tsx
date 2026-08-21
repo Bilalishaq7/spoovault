@@ -47,8 +47,8 @@ import {
 import {
   decryptData,
   encryptData,
+  fetchFromIPFS,
   generateEncryptionKey,
-  getIPFSURL,
   isIPFSConfigured,
   shortenAddress,
   uploadToIPFS,
@@ -61,7 +61,7 @@ import { buttonClasses } from "../utils/buttonClasses";
 import { captureError } from "../services/telemetry.service";
 import { keyInboxService } from "../services/keyInbox.service";
 import { keyStoreService } from "../services/keyStore.service";
-import { splitSecret } from "../services/secrets.service";
+import { splitSecretVSS, parseEncryptedMetadataPayload } from "../services/secrets.service";
 import { encryptWithPublicKey } from "../utils/crypto";
 
 type WordArray = { words: number[]; sigBytes: number };
@@ -107,7 +107,7 @@ const Documents = () => {
   } = useDisclosure();
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "accessible" | "encrypted">("all");
-  const { account, isConnected, connect, provider, signer, isFujiNetwork } = useWeb3();
+  const { account, isConnected, connect, provider, signer, isFujiNetwork, ecosystem } = useWeb3();
 
   const [documents, setDocuments] = useState<DocumentData[]>([]);
   const [vaults, setVaults] = useState<VaultData[]>([]);
@@ -141,8 +141,20 @@ const Documents = () => {
     "h-11 w-full rounded-full border border-gray-700/80 bg-gray-900/75 px-4 pr-10 text-sm text-gray-100 outline-none transition-colors hover:border-gray-600 focus:border-brand-700/70";
 
   useEffect(() => {
-    if (isConnected && provider && signer && isFujiNetwork) {
-      contractService.initialize(provider, signer);
+    setUploadableVaults([]);
+    setActiveAccessByDoc({});
+    setLatestRequestByDoc({});
+    setReleaseConditionByDoc({});
+    setDocuments([]);
+    setVaults([]);
+    setLoading(true);
+  }, [ecosystem]);
+
+  useEffect(() => {
+    if (isConnected && ((provider && signer && isFujiNetwork) || ecosystem === "stellar")) {
+      if (provider && signer) {
+        contractService.initialize(provider, signer);
+      }
       loadData();
     } else {
       setUploadableVaults([]);
@@ -151,7 +163,7 @@ const Documents = () => {
       setReleaseConditionByDoc({});
       setLoading(false);
     }
-  }, [account, isConnected, provider, signer, isFujiNetwork]);
+  }, [account, isConnected, provider, signer, isFujiNetwork, ecosystem]);
 
   const loadData = async () => {
     if (!account) {
@@ -226,7 +238,8 @@ const Documents = () => {
     const key = getStoredKey(doc.id);
     if (!key) return null;
     try {
-      const raw = decryptData(doc.encryptedMetadata, key);
+      const { ciphertext } = parseEncryptedMetadataPayload(doc.encryptedMetadata);
+      const raw = decryptData(ciphertext, key);
       return JSON.parse(raw);
     } catch {
       return null;
@@ -371,7 +384,7 @@ const Documents = () => {
         return;
       }
 
-      const encryptedKey = encryptWithPublicKey(key, beneficiaryPubKey);
+      const encryptedKey = await encryptWithPublicKey(key, beneficiaryPubKey);
 
       const payload = {
         version: 1,
@@ -456,7 +469,7 @@ const Documents = () => {
         return;
       }
 
-      const encryptedKey = encryptWithPublicKey(key, beneficiaryPubKey);
+      const encryptedKey = await encryptWithPublicKey(key, beneficiaryPubKey);
 
       await keyInboxService.sendKeyEnvelope({
         version: 1,
@@ -639,11 +652,21 @@ const Documents = () => {
         type: selectedFile.type,
         lastModified: selectedFile.lastModified,
       };
-      const encryptedMetadata = encryptData(JSON.stringify(metadata), key);
-      const encryptedFile = await encryptFile(selectedFile, key);
       
-      // Split symmetric key using Shamir's Secret Sharing (SSS)
-      const keyShares = splitSecret(key, vault.guardians.length, vault.approvalThreshold);
+      // Split symmetric key using Feldmann Verifiable Secret Sharing (VSS)
+      const { shares: keyShares, commitments } = splitSecretVSS(
+        key,
+        vault.guardians.length,
+        vault.approvalThreshold
+      );
+
+      const ciphertext = encryptData(JSON.stringify(metadata), key);
+      const encryptedMetadata = JSON.stringify({
+        ciphertext,
+        commitments,
+      });
+
+      const encryptedFile = await encryptFile(selectedFile, key);
       
       // Encrypt each share for each guardian using their public key
       const encryptedShares: string[] = [];
@@ -651,7 +674,7 @@ const Documents = () => {
         const guardian = vault.guardians[i];
         const pubKey = guardianPubKeys[guardian];
         const share = keyShares[i];
-        const encrypted = encryptWithPublicKey(share, pubKey);
+        const encrypted = await encryptWithPublicKey(share, pubKey);
         encryptedShares.push(encrypted);
       }
 
@@ -725,10 +748,7 @@ const Documents = () => {
       throw new Error("Encryption key not found for this document");
     }
 
-    const response = await fetch(getIPFSURL(doc.ipfsHash));
-    if (!response.ok) {
-      throw new Error("Failed to download encrypted file");
-    }
+    const response = await fetchFromIPFS(doc.ipfsHash);
 
     const encryptedText = await response.text();
     const decryptedWordArray = CryptoJS.AES.decrypt(encryptedText, key);

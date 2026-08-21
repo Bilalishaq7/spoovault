@@ -79,11 +79,12 @@ export const isValidEVMAddress = (address: string): boolean => {
 };
 
 /**
- * Validate Stellar address format (G...)
+ * Validate Stellar address format (G... or C...)
  */
 export const isValidStellarAddress = (address: string): boolean => {
   if (!address || typeof address !== "string") return false;
-  return /^G[A-Z2-7]{55}$/.test(address.trim());
+  const trimmed = address.trim();
+  return /^G[A-Z2-7]{55}$/.test(trimmed) || /^C[A-Z2-7]{55}$/.test(trimmed);
 };
 
 /**
@@ -96,15 +97,28 @@ export const isValidMultiChainAddress = (address: string): boolean => {
 /**
  * Validate address (supports both EVM and Stellar format)
  */
-export const isValidAddress = (address: string): boolean => {
+export const isValidAddress = (address: string, networkOrEcosystem?: string): boolean => {
+  if (networkOrEcosystem === "stellar") return isValidStellarAddress(address);
+  if (networkOrEcosystem === "avalanche" || networkOrEcosystem === "evm") return isValidEVMAddress(address);
   return isValidMultiChainAddress(address);
 };
 
 /**
- * Get IPFS gateway URL
+ * Get a deterministic IPFS gateway URL (primary gateway, for display/copy).
  */
 export const getIPFSURL = (hash: string): string => {
   return ipfsService.getURL(hash);
+};
+
+/**
+ * Download IPFS content with multi-gateway race fetch and circuit breaker.
+ * Failover is automatic on HTTP 429, timeouts, and other gateway errors.
+ */
+export const fetchFromIPFS = (
+  hash: string,
+  init?: RequestInit
+): Promise<Response> => {
+  return ipfsService.fetchFile(hash, init);
 };
 
 /**
@@ -183,11 +197,55 @@ export const getVaultGID = (
 };
 
 /**
+ * Build a document-count map keyed by VaultGID (not raw numeric vault id),
+ * so documents from same-numbered vaults on different chains never merge.
+ */
+export const buildVaultDocumentCounts = (
+  ecosystem: "avalanche" | "stellar",
+  chainId: number | null,
+  vaults: { id: number }[],
+  docs: { vaultId: number }[]
+): Record<string, number> => {
+  const visibleGidSet = new Set(
+    vaults.map((vault) => getVaultGID(ecosystem, chainId, vault.id))
+  );
+  const counts: Record<string, number> = {};
+  docs.forEach((doc) => {
+    const gid = getVaultGID(ecosystem, chainId, doc.vaultId);
+    if (visibleGidSet.has(gid)) {
+      counts[gid] = (counts[gid] || 0) + 1;
+    }
+  });
+  return counts;
+};
+
+/**
+ * Re-key a raw numeric-vault-id-keyed record (e.g. release states from the
+ * contract) onto VaultGID, so state from same-numbered vaults on different
+ * chains never overwrites or falls back onto each other.
+ */
+export const keyRecordByVaultGID = <T>(
+  ecosystem: "avalanche" | "stellar",
+  chainId: number | null,
+  recordByRawId: Record<string, T>
+): Record<string, T> => {
+  const result: Record<string, T> = {};
+  Object.entries(recordByRawId).forEach(([rawIdStr, value]) => {
+    const numId = Number(rawIdStr);
+    const gid = getVaultGID(ecosystem, chainId, numId);
+    result[gid] = value;
+  });
+  return result;
+};
+
+/**
  * Check if IPFS is configured
  */
 export const isIPFSConfigured = (): boolean => {
   return ipfsService.isConfigured();
 };
+
+
 
 
 

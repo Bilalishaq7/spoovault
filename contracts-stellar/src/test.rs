@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use super::*;
 use soroban_sdk::{testutils::Address as _, vec, Address, Env, String};
 
@@ -17,6 +15,69 @@ fn test_register_and_get_public_key() {
 
     let fetched = client.get_public_key(&user);
     assert_eq!(fetched, Some(pubkey));
+}
+
+#[test]
+fn test_cross_chain_identity_registration_and_resolution() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SpooVaultStellar);
+    let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+    let stellar_user = Address::generate(&env);
+    env.mock_all_auths();
+
+    let evm_address = String::from_str(&env, "0x64128680775Ef626379DeF6E5c815AeA8F4707Ef");
+    let enc_pubkey = String::from_str(&env, "0x04bfcab5516089d846985a12");
+
+    // Register cross-chain identity with public key
+    client.register_cross_chain_identity(
+        &stellar_user,
+        &evm_address,
+        &Some(enc_pubkey.clone()),
+    );
+
+    // Resolve EVM address to Stellar Address
+    let resolved_stellar = client.resolve_evm_to_stellar(&evm_address);
+    assert_eq!(resolved_stellar, Some(stellar_user.clone()));
+
+    // Resolve Stellar Address to EVM address
+    let resolved_evm = client.resolve_stellar_to_evm(&stellar_user);
+    assert_eq!(resolved_evm, Some(evm_address.clone()));
+
+    // Resolve EVM address to Encryption Public Key
+    let resolved_pubkey = client.resolve_evm_to_public_key(&evm_address);
+    assert_eq!(resolved_pubkey, Some(enc_pubkey));
+
+    // Resolve user's public key directly via Stellar Address
+    let fetched_stellar_pubkey = client.get_public_key(&stellar_user);
+    assert_eq!(fetched_stellar_pubkey, resolved_pubkey);
+}
+
+#[test]
+fn test_cross_chain_identity_fallback_resolution() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SpooVaultStellar);
+    let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+    let stellar_user = Address::generate(&env);
+    env.mock_all_auths();
+
+    let evm_address = String::from_str(&env, "0x1234567890123456789012345678901234567890");
+    let stellar_pubkey = String::from_str(&env, "STELLAR_ENCRYPTION_PUBKEY_TEST");
+
+    // Register stellar public key first
+    client.register_public_key(&stellar_user, &stellar_pubkey);
+
+    // Register cross-chain link without explicit separate pubkey
+    client.register_cross_chain_identity(
+        &stellar_user,
+        &evm_address,
+        &None,
+    );
+
+    // Should resolve EVM address to the Stellar public key via fallback
+    let resolved_pubkey = client.resolve_evm_to_public_key(&evm_address);
+    assert_eq!(resolved_pubkey, Some(stellar_pubkey));
 }
 
 #[test]
@@ -123,6 +184,41 @@ fn test_add_document_and_access_flow() {
 
     let req = client.get_access_request(&req_id).unwrap();
     assert_eq!(req.status, RequestStatus::Approved);
+}
+
+#[test]
+fn test_ttl_extensions() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SpooVaultStellar);
+    let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let requester = Address::generate(&env);
+    env.mock_all_auths();
+
+    let name = String::from_str(&env, "TTL Vault");
+    let desc = String::from_str(&env, "Testing TTL extensions");
+    let guardians = vec![&env, g1.clone()];
+
+    let vault_id = client.create_vault(&creator, &name, &desc, &guardians, &1);
+    let doc_id = client.add_document(
+        &creator,
+        &vault_id,
+        &String::from_str(&env, "meta"),
+        &String::from_str(&env, "QmHash"),
+        &AccessLevel::Read,
+        &ReleaseCondition::Anytime,
+        &vec![&env, creator.clone()],
+        &vec![&env, String::from_str(&env, "share")],
+    );
+    let req_id = client.request_access(&requester, &doc_id);
+
+    // Call explicit TTL extension endpoints
+    client.extend_contract_ttl();
+    client.extend_vault_ttl(&vault_id);
+    client.extend_document_ttl(&doc_id);
+    client.extend_request_ttl(&req_id);
 }
 
 #[test]
