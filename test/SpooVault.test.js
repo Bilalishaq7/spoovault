@@ -104,9 +104,8 @@ describe("SpooVault EVM Contract Unit Tests", function () {
       const pendingAfter = await spooVault.getPendingInvites(guardian1.address);
       expect(pendingAfter.length).to.equal(0);
 
-      const vault = await spooVault.getVault(1);
-      const guardians = vault.guardians || vault[5];
-      expect(guardians).to.include(guardian1.address);
+      const isGuardian = await spooVault.isGuardian(1, guardian1.address);
+      expect(isGuardian).to.be.true;
     });
 
     it("should revert acceptGuardianInvite for non-existent invite", async function () {
