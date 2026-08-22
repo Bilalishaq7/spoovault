@@ -4,7 +4,8 @@ pub mod identity_registry;
 
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contractimpl, contracttype, Address, Env, IntoVal, Map, String, Symbol, Val, Vec,
+    contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol,
+    Val, Vec,
 };
 
 /// Ledger constants for TTL extension thresholds and bump amounts (~5s per ledger)
@@ -98,6 +99,14 @@ pub struct VaultReleaseState {
     pub last_proof_of_life: u64,
 }
 
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CrossChainHeartbeatBinding {
+    pub gid_hash: BytesN<32>,
+    pub evm_owner: BytesN<20>,
+    pub relayer: Address,
+}
+
 /// Packed per-vault record: combined vault configuration, guardian list
 /// (already embedded in `Vault.guardians`) and the vault release state under a
 /// single storage key. This consolidates what were previously the `Vault` and
@@ -144,6 +153,7 @@ pub enum DataKey {
     EvmToStellar(String),
     StellarToEvm(Address),
     EvmToPubKey(String),
+    CrossChainHeartbeat(u64),
 }
 
 #[contract]
@@ -676,6 +686,105 @@ impl SpooVaultStellar {
         env.storage().persistent().set(&record_key, &record);
 
         Self::bump_persistent(&env, &record_key);
+    }
+
+    /// Bind a Soroban vault to its Avalanche vault GID and authorized relayer.
+    pub fn bind_cross_chain_heartbeat(
+        env: Env,
+        owner: Address,
+        vault_id: u64,
+        gid_hash: BytesN<32>,
+        evm_owner: BytesN<20>,
+        relayer: Address,
+    ) {
+        owner.require_auth();
+        Self::bump_instance(&env);
+
+        let record_key = DataKey::VaultRecord(vault_id);
+        let record: VaultRecord = env
+            .storage()
+            .persistent()
+            .get(&record_key)
+            .expect("Vault not found");
+        assert!(record.vault.creator == owner, "Only creator can bind heartbeat");
+        assert!(record.vault.is_active, "Vault not active");
+
+        let binding_key = DataKey::CrossChainHeartbeat(vault_id);
+        let binding = CrossChainHeartbeatBinding {
+            gid_hash,
+            evm_owner,
+            relayer,
+        };
+        env.storage().persistent().set(&binding_key, &binding);
+        Self::bump_persistent(&env, &binding_key);
+    }
+
+    /// Relay an EIP-191 signed Avalanche heartbeat into the Soroban vault.
+    pub fn sync_proof_of_life(
+        env: Env,
+        relayer: Address,
+        vault_id: u64,
+        evm_vault_id: u64,
+        gid_hash: BytesN<32>,
+        evm_owner: BytesN<20>,
+        timestamp: u64,
+        signature: BytesN<64>,
+        recovery_id: u32,
+    ) {
+        relayer.require_auth();
+        Self::bump_instance(&env);
+
+        let binding_key = DataKey::CrossChainHeartbeat(vault_id);
+        let binding: CrossChainHeartbeatBinding = env
+            .storage()
+            .persistent()
+            .get(&binding_key)
+            .expect("Cross-chain heartbeat not configured");
+        assert!(binding.relayer == relayer, "Unauthorized relayer");
+        assert!(binding.gid_hash == gid_hash, "Vault GID mismatch");
+        assert!(binding.evm_owner == evm_owner, "EVM owner mismatch");
+
+        let record_key = DataKey::VaultRecord(vault_id);
+        let mut record: VaultRecord = env
+            .storage()
+            .persistent()
+            .get(&record_key)
+            .expect("Vault not found");
+        assert!(timestamp > record.release_state.last_proof_of_life, "Stale heartbeat");
+        assert!(timestamp <= env.ledger().timestamp().saturating_add(300), "Future heartbeat");
+
+        let mut payload = Bytes::new(&env);
+        payload.extend_from_slice(b"SpooVaultProofOfLife");
+        payload.extend_from_array(&gid_hash.to_array());
+        payload.extend_from_slice(&evm_vault_id.to_be_bytes());
+        payload.extend_from_array(&evm_owner.to_array());
+        payload.extend_from_slice(&timestamp.to_be_bytes());
+        let message_hash = env.crypto().keccak256(&payload);
+
+        let mut eth_input = Bytes::new(&env);
+        eth_input.extend_from_slice(b"\x19Ethereum Signed Message:\n32");
+        eth_input.extend_from_array(&message_hash.to_array());
+        let digest = env.crypto().keccak256(&eth_input);
+        let recovered: BytesN<65> = env
+            .crypto()
+            .secp256k1_recover(&digest, &signature, recovery_id);
+        let recovered_hash = env.crypto().keccak256(&Bytes::from(recovered));
+        let recovered_bytes: Bytes = recovered_hash.into();
+        let recovered_owner: BytesN<20> = recovered_bytes
+            .slice(12..32)
+            .try_into()
+            .expect("Invalid recovered owner");
+        assert!(recovered_owner == evm_owner, "Invalid heartbeat signature");
+
+        record.release_state.last_proof_of_life = timestamp;
+        env.storage().persistent().set(&record_key, &record);
+        Self::bump_persistent(&env, &record_key);
+        Self::bump_persistent(&env, &binding_key);
+
+        env.events().publish(
+            (Symbol::new(&env, "proof_life_synced"), vault_id),
+            (gid_hash, evm_owner, timestamp),
+        );
     }
 
     /// Configure vault release conditions

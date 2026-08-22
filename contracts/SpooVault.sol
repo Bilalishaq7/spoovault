@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 import "./ISpooVault.sol";
 
 /**
@@ -13,6 +14,7 @@ import "./ISpooVault.sol";
  *      interface.
  */
 contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
+    using Strings for uint256;
     uint256 private _tokenIdCounter;
     uint256 private _vaultIdCounter;
     uint256 private _documentIdCounter;
@@ -180,7 +182,12 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     event NFTBurned(uint256 indexed tokenId);
     event AccessRevoked(uint256 indexed documentId, address indexed user);
     event VaultReleaseConfigured(uint256 indexed vaultId, uint256 inactivityPeriod);
-    event ProofOfLifeRecorded(uint256 indexed vaultId, address indexed owner, uint256 timestamp);
+    event ProofOfLifeRecorded(
+        uint256 indexed vaultId,
+        address indexed owner,
+        uint256 timestamp,
+        string vaultGid
+    );
     event EmergencyModeUpdated(uint256 indexed vaultId, bool enabled);
     event DocumentReleaseConditionSet(uint256 indexed documentId, ReleaseCondition condition);
     event PublicKeyRegistered(address indexed user, string publicKey);
@@ -427,7 +434,12 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         if (!vaults[vaultId].isActive) revert VaultNotActive();
 
         _vaultReleaseStates[vaultId].lastProofOfLife = block.timestamp;
-        emit ProofOfLifeRecorded(vaultId, msg.sender, block.timestamp);
+        emit ProofOfLifeRecorded(vaultId, msg.sender, block.timestamp, getVaultGID(vaultId));
+    }
+
+    /// @notice Returns the stable cross-chain identifier for an EVM vault.
+    function getVaultGID(uint256 vaultId) public view returns (string memory) {
+        return string.concat(block.chainid.toString(), ":", Strings.toHexString(address(this)), ":", vaultId.toString());
     }
 
     /**

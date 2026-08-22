@@ -83,6 +83,7 @@ const CONTRACT_ABI = [
   "function addDocumentWithReleaseCondition(uint256 vaultId, string encryptedMetadata, string ipfsHash, uint8 requiredAccess, uint8 releaseCondition, address[] guardiansList, string[] shares) external returns (uint256)",
   "function configureVaultRelease(uint256 vaultId, uint256 inactivityPeriod) external",
   "function proveLife(uint256 vaultId) external",
+  "function getVaultGID(uint256 vaultId) external view returns (string)",
   "function setEmergencyMode(uint256 vaultId, bool enabled) external",
   "function getVaultReleaseState(uint256 vaultId) external view returns (bool emergencyMode, uint256 inactivityPeriod, uint256 lastProofOfLife, bool postDeathUnlocked)",
   "function documentReleaseCondition(uint256 documentId) external view returns (uint8)",
@@ -1262,13 +1263,25 @@ const configureVaultRelease = async (
   await waitForReceipt(tx);
 };
 
-const recordProofOfLife = async (vaultId: number): Promise<void> => {
+const recordProofOfLife = async (vaultId: number): Promise<string> => {
   const contract = ensureWriteContract();
   if (!contractHasFunction(contract, "proveLife(uint256)")) {
     throw new Error("Current contract does not support proof-of-life actions.");
   }
   const tx = await contract.proveLife(vaultId);
-  await waitForReceipt(tx);
+  const receipt = await waitForReceipt(tx);
+  if (!receipt?.hash) throw new Error("Proof-of-life transaction was not confirmed");
+  return receipt.hash;
+};
+
+const getVaultGID = async (vaultId: number): Promise<string> => {
+  if (getEcosystem() === "stellar") {
+    return `stellar-testnet:${vaultId}`;
+  }
+  if (!readContract || !contractHasFunction(readContract, "getVaultGID(uint256)")) {
+    throw new Error("Cross-chain vault identity is not supported by this contract");
+  }
+  return String(await readContract.getVaultGID(vaultId));
 };
 
 const setEmergencyMode = async (vaultId: number, enabled: boolean): Promise<void> => {
@@ -1888,6 +1901,7 @@ export const contractService = {
   fetchVaultReleaseStates,
   configureVaultRelease,
   recordProofOfLife,
+  getVaultGID,
   setEmergencyMode,
   fetchPendingApprovalsForGuardian: proxiedFetchPendingApprovalsForGuardian,
   getRecentActivity,
