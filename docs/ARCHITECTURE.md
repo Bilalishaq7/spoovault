@@ -77,7 +77,47 @@ Callers use `ipfsService.fetchFile` / `fetchFromIPFS` (Documents, Access Center,
 
 ---
 
-## 5. Read-Call Caching
+## 5. Private Information Retrieval (PIR)
+
+To prevent IPFS gateway surveillance (where gateways log requester IP addresses and requested CIDs, allowing correlation of beneficiary identities with specific vault documents), SpooVault implements Private Information Retrieval (PIR) principles:
+
+### PIR Components (`src/services/pir.service.ts`)
+
+1. **HomomorphicHash**: Generates deterministic but non-reversible CID identifiers using SHA-256 with per-session salt. Same CID produces same hash within a session, but different sessions produce different hashes, preventing gateway operators from identifying specific documents from logged hashes.
+
+2. **DummyQueryBatcher**: Generates dummy IPFS queries that look like real CIDs (CIDv0 format) and batches real queries with dummy queries to obscure which document is being fetched. The batch is shuffled to prevent position-based analysis. Configurable dummy query count (default: 5) and batch delay (default: 100ms).
+
+3. **TorProxyClient**: SOCKS5 proxy client for routing IPFS requests through Tor, providing IP address anonymity when fetching documents. Requires local Tor daemon with SOCKS5 proxy enabled (default: 127.0.0.1:9050). Falls back to standard fetch if Tor is unavailable.
+
+### PIR Integration
+
+The PIR service integrates with the existing IPFS gateway infrastructure:
+- `ipfsService.fetchFileWithPIR()`: New method that uses PIR for document fetches
+- Falls back to standard `ipfsGateway.fetchFile()` if PIR is disabled
+- Maintains compatibility with existing multi-gateway circuit breaker
+- Works with existing gateway pool and health scoring system
+
+### Configuration
+
+PIR is configured via environment variables (see `.env.example`):
+- `VITE_PIR_ENABLED`: Enable PIR to obscure which documents are being fetched
+- `VITE_PIR_USE_TOR`: Use Tor SOCKS5 proxy for IPFS fetches
+- `VITE_PIR_TOR_HOST`: Tor SOCKS5 proxy host (default: 127.0.0.1)
+- `VITE_PIR_TOR_PORT`: Tor SOCKS5 proxy port (default: 9050)
+- `VITE_PIR_DUMMY_COUNT`: Number of dummy queries to batch with real queries (default: 5)
+- `VITE_PIR_BATCH_DELAY`: Delay between dummy queries in milliseconds (default: 100)
+
+### Security Properties
+
+- **Oblivious Gateway Querying**: Real queries are batched with dummy queries, making it statistically difficult for gateways to identify which query corresponds to the actual document
+- **Mixnet Proxy Routing**: When enabled, all IPFS requests are routed through Tor's SOCKS5 proxy for IP address anonymity
+- **Encrypted CID Index**: CIDs are hashed with session-specific salts before logging, making hashes non-reversible
+
+See `docs/PIR_ARCHITECTURE.md` for detailed PIR architecture and usage documentation.
+
+---
+
+## 6. Read-Call Caching
 
 `contract.service.ts` caches the results of read-only view calls (`hasActiveAccess`, `getVault`) for a 10-second TTL, keyed by their arguments (document/vault/user), with concurrent duplicate calls deduped into a single underlying request. This avoids re-issuing the same RPC call on every page navigation or component remount. Write actions that change cached state (e.g. `approveAccess`, `acceptGuardianInvite`, `burnAccessToken`) invalidate the relevant cache entries immediately, and `contractService.clear()` resets the cache on wallet disconnect. See `src/utils/ttlCache.ts` for the generic cache implementation.
 
@@ -85,7 +125,7 @@ The Stellar/Soroban path currently has no real RPC calls (reads are `localStorag
 
 ---
 
-## 6. Windowed List Rendering (Document & Access Pass Lists)
+## 7. Windowed List Rendering (Document & Access Pass Lists)
 
 `Documents.tsx` and `NFTGallery.tsx` render potentially large lists (uploaded documents, minted access passes) that previously mounted every item to the DOM unconditionally, causing scroll jank as a vault's item count grows.
 

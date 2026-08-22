@@ -25,6 +25,7 @@ Enterprise-grade document custody app supporting both **Avalanche (EVM)** and **
 - **Guardian Multi-Sig Approval**: Distribute access keys across trusted guardians requiring threshold approval before document release.
 - **Proof-of-Life & Dead-Man's Switch**: Configurable inactivity timers automatically release encrypted access packages to designated beneficiaries if owner heartbeat lapses.
 - **IPFS Storage & Proxying**: Decoupled decentralized storage with optional serverless proxy to prevent Pinata API key exposure.
+- **Private Information Retrieval (PIR)**: Oblivious IPFS document fetching using dummy query batching and optional Tor proxy routing to prevent gateway surveillance.
 - **NFT Access Passes**: Tokenized authorization layers representing access rights to specific document vaults.
 
 ---
