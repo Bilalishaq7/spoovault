@@ -41,6 +41,7 @@ function runStellar(args, opts = {}) {
   try {
     return execFileSync(stellarBin, args, {
       encoding: "utf8",
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
       cwd: opts.cwd,
     }).trim();
   } catch (err) {
@@ -89,6 +90,8 @@ before(async () => {
   guardian = makeKey("guardian");
   beneficiary = makeKey("beneficiary");
 
+  // Build the wasm (expects rust + wasm32 target). The build must run inside
+  // the crate directory where the Cargo.toml lives.
   // Build the wasm (expects rust + wasm32 target, available in soroban-preview).
   runStellar(["contract", "build"], { cwd: STELLAR_CRATE });
   const wasm = resolve(
