@@ -135,5 +135,9 @@ jobs:
           STELLAR_NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
         run: |
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-          export STELLAR_BIN="$HOME/.local/bin/stellar"
+          # Resolve the absolute path to the stellar CLI. The image may ship it
+          # pre-installed (or our install step placed it elsewhere); using the
+          # absolute path avoids the execFileSync ENOENT that occurs when a
+          # cwd is supplied to spawn.
+          export STELLAR_BIN="$(command -v stellar || echo stellar)"
           node e2e/soroban/soroban-flow.test.mjs

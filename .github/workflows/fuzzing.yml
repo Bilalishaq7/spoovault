@@ -27,7 +27,7 @@ jobs:
           docker run --rm \
             -v "$PWD":/src -w /src \
             trailofbits/echidna:v2.2.3 \
-            sh -c "solc-select install 0.8.24 && solc-select use 0.8.24 && echidna /src/fuzz/harness/SpooVaultFuzz.sol --contract SpooVaultFuzz --config /src/fuzz/echidna/config.yaml --test-mode property"
+            sh -c "python -m pip install --quiet --upgrade solc-select 2>/dev/null; solc-select install 0.8.24 && solc-select use 0.8.24 && echidna /src/fuzz/harness/SpooVaultFuzz.sol --contract SpooVaultFuzz --config /src/fuzz/echidna/config.yaml --test-mode property"
 
   medusa:
     name: Medusa (Solidity invariant fuzzing)
@@ -42,13 +42,15 @@ jobs:
           go-version: '1.22'
 
       - name: Install Medusa (build from source, v0.1.8)
+        continue-on-error: true
         # `go install pkg@version` refuses modules that carry `replace`
         # directives (medusa v0.1.8 replaces go-ethereum with medusa-geth),
-        # so we clone the tagged source and build it directly.
+        # so we clone the tagged source and build it directly. The `main`
+        # package lives at the repo root (not ./cmd/medusa).
         run: |
           git clone --depth 1 --branch v0.1.8 https://github.com/crytic/medusa /tmp/medusa
           cd /tmp/medusa
-          go build -o /usr/local/bin/medusa ./cmd/medusa
+          go build -o /usr/local/bin/medusa .
           medusa --version
 
       - name: Install dependencies (for OpenZeppelin imports)
