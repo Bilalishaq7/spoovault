@@ -18,7 +18,7 @@
  *   - Three funded identities supplied via env, or auto-generated + funded from
  *     the standalone network's friendbot.
  */
-import { test, beforeAll } from "node:test";
+import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
@@ -34,8 +34,16 @@ const NETWORK_PASSPHRASE =
 const NETWORK = "spoovault-e2e";
 
 function runStellar(args, opts = {}) {
+  // Allow the binary location to be overridden (CI pins it to an absolute path
+  // because Node's spawn cannot always resolve `stellar` from PATH when a
+  // `cwd` is supplied to execFileSync).
+  const stellarBin = process.env.STELLAR_BIN || "stellar";
   try {
-    return execFileSync("stellar", args, { encoding: "utf8" }).trim();
+    return execFileSync(stellarBin, args, {
+      encoding: "utf8",
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
+      cwd: opts.cwd,
+    }).trim();
   } catch (err) {
     if (opts.allowFail) return "";
     throw new Error(
@@ -54,8 +62,6 @@ function ensureNetwork() {
       RPC_URL,
       "--network-passphrase",
       NETWORK_PASSPHRASE,
-      "--friendbot-url",
-      `${RPC_URL}/friendbot`,
     ],
     { allowFail: true },
   );
@@ -66,7 +72,7 @@ let guardian;
 let beneficiary;
 let contractId;
 
-beforeAll(async () => {
+before(async () => {
   ensureNetwork();
 
   // Identities: use provided funded secrets, else generate + fund from faucet.
@@ -77,15 +83,17 @@ beforeAll(async () => {
       allowFail: true,
     });
     runStellar(["keys", "fund", name, "--network", NETWORK], { allowFail: true });
-    return runStellar(["keys", "show", name, "--network", NETWORK]);
+    return runStellar(["keys", "secret", name]);
   };
 
   creator = makeKey("creator");
   guardian = makeKey("guardian");
   beneficiary = makeKey("beneficiary");
 
+  // Build the wasm (expects rust + wasm32 target). The build must run inside
+  // the crate directory where the Cargo.toml lives.
   // Build the wasm (expects rust + wasm32 target, available in soroban-preview).
-  runStellar(["contract", "build"]);
+  runStellar(["contract", "build"], { cwd: STELLAR_CRATE });
   const wasm = resolve(
     STELLAR_CRATE,
     "target/wasm32-unknown-unknown/release/spoovault_stellar.wasm",

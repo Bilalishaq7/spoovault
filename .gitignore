@@ -49,6 +49,7 @@ gas-summary.json
 # Rust / Soroban
 target/
 contracts-stellar/target/
+contracts-stellar/test_snapshots/
 
 # Web3 E2E (Synpress / Playwright)
 .cache-synpress/
@@ -57,4 +58,8 @@ playwright-report/
 test-results/
 blob-report/
 .playwright/
+
+# Claude Code
+.claude
+CLAUDE.md
 

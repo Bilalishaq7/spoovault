@@ -6,6 +6,7 @@ import { formatDate, shortenAddress } from "../utils/helpers";
 import { toast } from "react-hot-toast";
 import { buttonClasses } from "../utils/buttonClasses";
 import { contractService, GuardianInviteData } from "../services/contract.service";
+import { identityService, IdentityBinding } from "../services/identity.service";
 import { clientKeyringService } from "../services/clientKeyring.service";
 
 interface InviteVaultContext {
@@ -28,6 +29,10 @@ const Profile = () => {
   const [hasPasskey, setHasPasskey] = useState(false);
   const [checkingKey, setCheckingKey] = useState(false);
   const [registeringKey, setRegisteringKey] = useState(false);
+  const [crossChainEvm, setCrossChainEvm] = useState("");
+  const [crossChainStellar, setCrossChainStellar] = useState("");
+  const [bindingIdentity, setBindingIdentity] = useState(false);
+  const [registeredBindings, setRegisteredBindings] = useState<IdentityBinding[]>([]);
   const [pin, setPin] = useState("");
   const [showPinInput, setShowPinInput] = useState(false);
   const [backupPassphrase, setBackupPassphrase] = useState("");
@@ -56,8 +61,32 @@ const Profile = () => {
   }, []);
 
   useEffect(() => {
+    setRegisteredBindings(identityService.getRegisteredIdentities());
+  }, []);
+
+  useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  const handleBindIdentity = async () => {
+    if (!crossChainEvm.trim() || !crossChainStellar.trim()) {
+      toast.error("Please enter both EVM address (0x...) and Stellar public key (G...)");
+      return;
+    }
+
+    setBindingIdentity(true);
+    try {
+      await identityService.registerIdentity(crossChainEvm, crossChainStellar);
+      toast.success("Cross-chain identity registered successfully!");
+      setCrossChainEvm("");
+      setCrossChainStellar("");
+      setRegisteredBindings(identityService.getRegisteredIdentities());
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to register identity binding");
+    } finally {
+      setBindingIdentity(false);
+    }
+  };
 
   const loadPublicKeyStatus = async () => {
     if (!account) {
@@ -560,6 +589,79 @@ const Profile = () => {
                 </Button>
               </div>
             ))
+          )}
+        </CardBody>
+      </Card>
+
+      <Card className="border border-gray-800 bg-gray-900/40 backdrop-blur-sm">
+        <CardHeader className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-600 to-purple-800 flex items-center justify-center">
+              <FiKey className="text-white" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold">Cross-Network Identity Binding</h2>
+              <p className="text-sm text-gray-400">
+                Link EVM (0x...) and Stellar (G...) addresses for cross-network guardian invitations
+              </p>
+            </div>
+          </div>
+          <Chip size="sm" variant="flat" color="secondary">
+            {registeredBindings.length} Linked
+          </Chip>
+        </CardHeader>
+        <CardBody className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Input
+              label="Avalanche EVM Address (0x...)"
+              placeholder="0x6412...07Ef"
+              value={crossChainEvm}
+              onValueChange={setCrossChainEvm}
+              classNames={profileInputClassNames}
+            />
+            <Input
+              label="Stellar Soroban Address (G...)"
+              placeholder="GBCDF...STEL"
+              value={crossChainStellar}
+              onValueChange={setCrossChainStellar}
+              classNames={profileInputClassNames}
+            />
+          </div>
+          <div className="flex justify-end">
+            <Button
+              className={buttonClasses.primarySm}
+              startContent={<FiSave />}
+              isLoading={bindingIdentity}
+              onPress={handleBindIdentity}
+            >
+              Bind Identity Mapping
+            </Button>
+          </div>
+
+          {registeredBindings.length > 0 ? (
+            <div className="space-y-2 pt-2 border-t border-gray-800/80">
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                Registered Cross-Chain Identities
+              </p>
+              {registeredBindings.map((binding) => (
+                <div
+                  key={`${binding.evmAddress}-${binding.stellarAddress}`}
+                  className="rounded-xl border border-gray-800 bg-gray-900/60 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+                >
+                  <div className="font-mono space-y-0.5">
+                    <p className="text-red-400">EVM: {binding.evmAddress}</p>
+                    <p className="text-purple-400">Stellar: {binding.stellarAddress}</p>
+                  </div>
+                  <span className="text-gray-500">
+                    Linked {formatDate(binding.registeredAt)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500 pt-2">
+              No cross-chain identity bindings registered yet. Bind your EVM and Stellar wallets to allow cross-network guardian invites.
+            </p>
           )}
         </CardBody>
       </Card>
