@@ -178,4 +178,62 @@ describe("SpooVault EVM Contract Unit Tests", function () {
       expect(await spooVault.hasActiveAccess(1, userA.address)).to.equal(true);
     });
   });
+
+  describe("Cross-Chain Revocation Broadcast", function () {
+    let userA;
+
+    beforeEach(async function () {
+      const signers = await ethers.getSigners();
+      userA = signers[4];
+
+      await spooVault.connect(owner).createVault("Broadcast Vault", "Desc", [guardian1.address], 1);
+      await spooVault.connect(guardian1).acceptGuardianInvite(1);
+      await spooVault.connect(guardian1).mintAccessToken(1, userA.address, "uri");
+      await spooVault.connect(guardian1).addDocument(1, "meta", "ipfs-hash", 0);
+      await spooVault.connect(userA).requestAccess(1);
+      await spooVault.connect(guardian1).approveAccess(1);
+    });
+
+    it("computes vaultGID from this contract's address and the vault id", async function () {
+      const expected = ethers.solidityPackedKeccak256(
+        ["address", "uint256"],
+        [await spooVault.getAddress(), 1]
+      );
+      expect(await spooVault.vaultGID(1)).to.equal(expected);
+    });
+
+    it("differs per vault since vaultGID incorporates the vault id", async function () {
+      await spooVault.connect(owner).createVault("Second Vault", "Desc", [guardian2.address], 1);
+      const gid1 = await spooVault.vaultGID(1);
+      const gid2 = await spooVault.vaultGID(2);
+      expect(gid1).to.not.equal(gid2);
+    });
+
+    it("still clears on-chain access and emits AccessRevoked alongside the broadcast", async function () {
+      expect(await spooVault.hasActiveAccess(1, userA.address)).to.equal(true);
+
+      await expect(spooVault.connect(guardian1).revokeAccess(1, userA.address))
+        .to.emit(spooVault, "AccessRevoked")
+        .withArgs(1, userA.address);
+
+      expect(await spooVault.hasActiveAccess(1, userA.address)).to.equal(false);
+    });
+
+    it("emits CrossChainRevocationBroadcast with a strictly increasing nonce on each revoke", async function () {
+      const gid = await spooVault.vaultGID(1);
+
+      await expect(spooVault.connect(guardian1).revokeAccess(1, userA.address))
+        .to.emit(spooVault, "CrossChainRevocationBroadcast")
+        .withArgs(gid, 1, userA.address, 1);
+      expect(await spooVault.documentRevocationNonce(1, userA.address)).to.equal(1);
+
+      // A relayed message for a Soroban-side relay_revoke_access call must
+      // never be replayable, so the nonce keeps increasing even across
+      // repeated revokes of the same document/user pair.
+      await expect(spooVault.connect(guardian1).revokeAccess(1, userA.address))
+        .to.emit(spooVault, "CrossChainRevocationBroadcast")
+        .withArgs(gid, 1, userA.address, 2);
+      expect(await spooVault.documentRevocationNonce(1, userA.address)).to.equal(2);
+    });
+  });
 });

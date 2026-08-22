@@ -136,7 +136,7 @@ pub enum DataKey {
     // Cross-Chain Revocation Broadcast Engine
     VaultGid(BytesN<32>),
     CrossChainRevoker(u64),
-    RevocationNonce(u64, Address),
+    RevocationNonce(BytesN<32>, u64, Address),
 }
 
 #[contract]
@@ -826,7 +826,12 @@ impl SpooVaultStellar {
     /// `target_stellar_user`, resolved off-chain before the EVM guardian
     /// signs), so a relayer cannot redirect a validly-signed message to a
     /// different beneficiary or vault. `nonce` must strictly increase per
-    /// (document, beneficiary) pair, blocking replay.
+    /// (vault_gid, document, beneficiary) triple, blocking replay - scoping
+    /// by `vault_gid` rather than just document/beneficiary means that if the
+    /// EVM contract is ever redeployed to a new address (and thus a new
+    /// `vaultGID`, since it is derived from `address(this)`) and re-linked,
+    /// nonce tracking starts fresh instead of being stuck behind whatever
+    /// nonce the previous deployment last used.
     pub fn relay_revoke_access(
         env: Env,
         vault_gid: BytesN<32>,
@@ -853,7 +858,8 @@ impl SpooVaultStellar {
             .expect("Document not found");
         assert!(doc.vault_id == vault_id, "Document does not belong to linked vault");
 
-        let nonce_key = DataKey::RevocationNonce(document_id, target_stellar_user.clone());
+        let nonce_key =
+            DataKey::RevocationNonce(vault_gid.clone(), document_id, target_stellar_user.clone());
         let last_nonce: u64 = env.storage().persistent().get(&nonce_key).unwrap_or(0);
         assert!(nonce > last_nonce, "Stale or replayed revocation nonce");
 
