@@ -173,6 +173,7 @@ export const getContractId = (): string => {
 };
 
 
+
 const isConfigured = (): boolean => {
   return !!getContractId();
 };
@@ -1092,7 +1093,6 @@ const resolveEvmToPublicKey = async (evmAddress: string): Promise<string | null>
 
   return null;
 };
-
 
 export const stellarService = {
   initialize,
