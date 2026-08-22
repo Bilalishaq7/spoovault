@@ -169,6 +169,11 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     // Access versions let us invalidate all prior document grants for a user+vault in O(1).
     mapping(uint256 => mapping(address => uint256)) private _vaultAccessVersion;
     mapping(uint256 => mapping(address => uint256)) private _documentAccessVersion;
+
+    // Strictly-increasing per (documentId, user) nonce for cross-chain revocation
+    // broadcasts. Lets a relayed message be replay-protected on the receiving
+    // chain independent of any chain-specific block/ledger sequencing.
+    mapping(uint256 => mapping(address => uint256)) public documentRevocationNonce;
     mapping(uint256 => VaultReleaseState) private _vaultReleaseStates;
 
     // Guardian rotation and threshold adjustment governance
@@ -187,6 +192,9 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     event NFTMinted(uint256 indexed tokenId, address indexed to, uint256 indexed vaultId);
     event NFTBurned(uint256 indexed tokenId);
     event AccessRevoked(uint256 indexed documentId, address indexed user);
+    event CrossChainRevocationBroadcast(
+        bytes32 indexed vaultGID, uint256 indexed documentId, address indexed targetUser, uint256 nonce
+    );
     event VaultReleaseConfigured(uint256 indexed vaultId, uint256 inactivityPeriod);
     event ProofOfLifeRecorded(uint256 indexed vaultId, address indexed owner, uint256 timestamp);
     event EmergencyModeUpdated(uint256 indexed vaultId, bool enabled);
@@ -802,7 +810,12 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     }
 
     /**
-     * @dev Revoke access from user for a specific document.
+     * @dev Revoke access from user for a specific document. Also emits a
+     *      cross-chain revocation broadcast payload (vaultGID, documentId,
+     *      targetUser, nonce) that a relayer can have the calling guardian
+     *      sign and forward to the linked Soroban vault via
+     *      `relay_revoke_access`, closing the window where a still-cached
+     *      Stellar-side grant could be used after this EVM-side revocation.
      */
     function revokeAccess(uint256 documentId, address user) external nonReentrant {
         if (documents[documentId].id == 0) revert DocumentNotExist();
@@ -814,7 +827,18 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         delete userAccessLevel[documentId][user];
         delete _documentAccessVersion[documentId][user];
 
+        uint256 nonce = ++documentRevocationNonce[documentId][user];
+
         emit AccessRevoked(documentId, user);
+        emit CrossChainRevocationBroadcast(vaultGID(vaultId), documentId, user, nonce);
+    }
+
+    /// @notice Globally-unique cross-chain identifier for a vault, derived from
+    ///         this contract's address and the local vault id. A Soroban vault
+    ///         links itself to this id via `link_cross_chain_vault` so relayed
+    ///         revocation broadcasts can be routed to the right vault.
+    function vaultGID(uint256 vaultId) public view returns (bytes32) {
+        return keccak256(abi.encodePacked(address(this), vaultId));
     }
 
     /**
