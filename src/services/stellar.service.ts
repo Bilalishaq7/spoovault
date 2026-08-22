@@ -1409,7 +1409,6 @@ const resolveEvmToPublicKey = async (evmAddress: string): Promise<string | null>
   return null;
 };
 
-
 export const stellarService = {
   initialize,
   clear,
