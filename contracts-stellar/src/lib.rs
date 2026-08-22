@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, String, Vec,
+    auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
+    contract, contractimpl, contracttype, Address, Env, IntoVal, Map, String, Symbol, Val, Vec,
 };
 
 /// Ledger constants for TTL extension thresholds and bump amounts (~5s per ledger)
@@ -71,6 +72,7 @@ pub struct AccessRequest {
     pub document_id: u64,
     pub requester: Address,
     pub approved_by: Vec<Address>,
+    pub beneficiary_shares: Map<Address, String>,
     pub status: RequestStatus,
     pub expires_at: u64,
     pub created_at: u64,
@@ -93,25 +95,48 @@ pub struct VaultReleaseState {
     pub last_proof_of_life: u64,
 }
 
+/// Packed per-vault record: combined vault configuration, guardian list
+/// (already embedded in `Vault.guardians`) and the vault release state under a
+/// single storage key. This consolidates what were previously the `Vault` and
+/// `ReleaseState` keys, and removes the redundant per-guardian `IsGuardian`
+/// keys entirely (guardianship is derivable from `Vault.guardians`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VaultRecord {
+    pub vault: Vault,
+    pub release_state: VaultReleaseState,
+}
+
+/// Packed per-document record: combines the document, its release condition,
+/// the per-user access grants (replacing the separate `HasAccess`/`AccessLvl`
+/// keys), the per-guardian encryption shares (replacing `GShare` keys) and the
+/// latest request id per requester (replacing `LatestReq` keys) into a single
+/// storage key.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DocumentRecord {
+    pub document: Document,
+    pub release_condition: ReleaseCondition,
+    pub access: Map<Address, AccessLevel>,
+    pub shares: Map<Address, String>,
+}
+
 #[contracttype]
 pub enum DataKey {
     VaultCount,
     DocCount,
     ReqCount,
-    Vault(u64),
-    Doc(u64),
+    VaultRecord(u64),
+    DocumentRecord(u64),
     Request(u64),
-    IsGuardian(u64, Address),
-    HasAccess(u64, Address),
-    AccessLvl(u64, Address),
     Invites(Address),
-    ApprovedReq(u64, Address),
-    LatestReq(u64, Address),
     PubKey(Address),
     GShare(u64, Address),
     BShare(u64, Address),
     DocReleaseCond(u64),
     ReleaseState(u64),
+    // Optional external registry contract notified on document access grants
+    AccessRegistry(u64),
     // Cross-Chain Identity Lookup Map
     EvmToStellar(String),
     StellarToEvm(Address),
@@ -131,20 +156,18 @@ impl SpooVaultStellar {
     /// Extend persistent storage TTL for a vault and its state
     pub fn extend_vault_ttl(env: Env, vault_id: u64) {
         Self::bump_instance(&env);
-        let vault_key = DataKey::Vault(vault_id);
-        if env.storage().persistent().has(&vault_key) {
-            Self::bump_persistent(&env, &vault_key);
-            Self::bump_persistent(&env, &DataKey::ReleaseState(vault_id));
+        let key = DataKey::VaultRecord(vault_id);
+        if env.storage().persistent().has(&key) {
+            Self::bump_persistent(&env, &key);
         }
     }
 
     /// Extend persistent storage TTL for a document
     pub fn extend_document_ttl(env: Env, document_id: u64) {
         Self::bump_instance(&env);
-        let doc_key = DataKey::Doc(document_id);
-        if env.storage().persistent().has(&doc_key) {
-            Self::bump_persistent(&env, &doc_key);
-            Self::bump_persistent(&env, &DataKey::DocReleaseCond(document_id));
+        let key = DataKey::DocumentRecord(document_id);
+        if env.storage().persistent().has(&key) {
+            Self::bump_persistent(&env, &key);
         }
     }
 
@@ -192,8 +215,12 @@ impl SpooVaultStellar {
         let evm_to_stellar_key = DataKey::EvmToStellar(evm_address.clone());
         let stellar_to_evm_key = DataKey::StellarToEvm(stellar_user.clone());
 
-        env.storage().persistent().set(&evm_to_stellar_key, &stellar_user);
-        env.storage().persistent().set(&stellar_to_evm_key, &evm_address);
+        env.storage()
+            .persistent()
+            .set(&evm_to_stellar_key, &stellar_user);
+        env.storage()
+            .persistent()
+            .set(&stellar_to_evm_key, &evm_address);
 
         Self::bump_persistent(&env, &evm_to_stellar_key);
         Self::bump_persistent(&env, &stellar_to_evm_key);
@@ -250,7 +277,14 @@ impl SpooVaultStellar {
         None
     }
 
-    /// Create a new Vault
+    /// Create a new Vault.
+    ///
+    /// `creator` and each entry in `guardians` are plain `Address` values, so
+    /// they may be either a raw Stellar keypair (G-account) or a deployed
+    /// contract address (a multisig / custom account-abstraction signer, or
+    /// any other contract implementing `soroban_sdk::auth::CustomAccountInterface`).
+    /// `require_auth` resolves against whichever kind of address is supplied,
+    /// so no special-casing is needed here for contract-account guardians.
     pub fn create_vault(
         env: Env,
         creator: Address,
@@ -277,16 +311,25 @@ impl SpooVaultStellar {
             }
         }
 
-        assert!(ext_guardian_count > 0, "At least one external guardian required");
+        assert!(
+            ext_guardian_count > 0,
+            "At least one external guardian required"
+        );
         let total_guardians = ext_guardian_count + 1;
         assert!(
             approval_threshold > 0 && approval_threshold <= total_guardians,
             "Invalid approval threshold"
         );
 
-        let vault_count: u64 = env.storage().instance().get(&DataKey::VaultCount).unwrap_or(0);
+        let vault_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VaultCount)
+            .unwrap_or(0);
         let next_vault_id = vault_count + 1;
-        env.storage().instance().set(&DataKey::VaultCount, &next_vault_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::VaultCount, &next_vault_id);
 
         let mut actual_guardians = Vec::new(&env);
         actual_guardians.push_back(creator.clone());
@@ -302,22 +345,21 @@ impl SpooVaultStellar {
             created_at: env.ledger().timestamp(),
         };
 
-        let vault_key = DataKey::Vault(next_vault_id);
-        let is_guardian_key = DataKey::IsGuardian(next_vault_id, creator.clone());
-        env.storage().persistent().set(&vault_key, &vault);
-        env.storage().persistent().set(&is_guardian_key, &true);
-        Self::bump_persistent(&env, &vault_key);
-        Self::bump_persistent(&env, &is_guardian_key);
-
-        // Configure release state defaults
+        // Pack vault configuration together with its release state under one key.
         let release_state = VaultReleaseState {
             emergency_mode: false,
             inactivity_period: 30 * 24 * 60 * 60, // 30 days in seconds
             last_proof_of_life: env.ledger().timestamp(),
         };
-        let release_key = DataKey::ReleaseState(next_vault_id);
-        env.storage().persistent().set(&release_key, &release_state);
-        Self::bump_persistent(&env, &release_key);
+
+        let record = VaultRecord {
+            vault,
+            release_state,
+        };
+
+        let record_key = DataKey::VaultRecord(next_vault_id);
+        env.storage().persistent().set(&record_key, &record);
+        Self::bump_persistent(&env, &record_key);
 
         // Record invites for external guardians
         for i in 0..guardians.len() {
@@ -352,21 +394,18 @@ impl SpooVaultStellar {
         guardian.require_auth();
         Self::bump_instance(&env);
 
-        let vault_key = DataKey::Vault(vault_id);
-        let mut vault: Vault = env
+        let record_key = DataKey::VaultRecord(vault_id);
+        let mut record: VaultRecord = env
             .storage()
             .persistent()
-            .get(&vault_key)
+            .get(&record_key)
             .expect("Vault does not exist");
-        assert!(vault.is_active, "Vault not active");
-
-        let is_guard_key = DataKey::IsGuardian(vault_id, guardian.clone());
-        let is_guard: bool = env
-            .storage()
-            .persistent()
-            .get(&is_guard_key)
-            .unwrap_or(false);
-        assert!(!is_guard, "Already guardian");
+        assert!(record.vault.is_active, "Vault not active");
+        // Guardianship is derivable from the packed guardian list.
+        assert!(
+            !Self::is_guardian_in_vault(&record.vault, &guardian),
+            "Already guardian"
+        );
 
         let invites_key = DataKey::Invites(guardian.clone());
         let mut user_invites: Vec<GuardianInvite> = env
@@ -379,7 +418,10 @@ impl SpooVaultStellar {
         for i in 0..user_invites.len() {
             let mut invite = user_invites.get(i).unwrap();
             if invite.vault_id == vault_id && !invite.accepted {
-                assert!(env.ledger().timestamp() < invite.expires_at, "Invite expired");
+                assert!(
+                    env.ledger().timestamp() < invite.expires_at,
+                    "Invite expired"
+                );
                 invite.accepted = true;
                 user_invites.set(i, invite);
                 accepted = true;
@@ -389,16 +431,16 @@ impl SpooVaultStellar {
 
         assert!(accepted, "No valid invite found");
         env.storage().persistent().set(&invites_key, &user_invites);
-        env.storage().persistent().set(&is_guard_key, &true);
         Self::bump_persistent(&env, &invites_key);
-        Self::bump_persistent(&env, &is_guard_key);
 
-        vault.guardians.push_back(guardian);
-        env.storage().persistent().set(&vault_key, &vault);
-        Self::bump_persistent(&env, &vault_key);
+        // Persist guardianship by appending to the packed guardian list.
+        record.vault.guardians.push_back(guardian);
+        env.storage().persistent().set(&record_key, &record);
+        Self::bump_persistent(&env, &record_key);
     }
 
     /// Add a document metadata and storage hash
+    #[allow(clippy::too_many_arguments)]
     pub fn add_document(
         env: Env,
         uploader: Address,
@@ -413,21 +455,31 @@ impl SpooVaultStellar {
         uploader.require_auth();
         Self::bump_instance(&env);
 
-        let is_guard: bool = env
+        let record_key = DataKey::VaultRecord(vault_id);
+        let record: VaultRecord = env
             .storage()
             .persistent()
-            .get(&DataKey::IsGuardian(vault_id, uploader.clone()))
-            .unwrap_or(false);
-        assert!(is_guard, "Only guardians can upload documents");
-        assert!(ipfs_hash.len() > 0, "IPFS hash required");
+            .get(&record_key)
+            .expect("Vault does not exist");
+        assert!(
+            Self::is_guardian_in_vault(&record.vault, &uploader),
+            "Only guardians can upload documents"
+        );
+        assert!(!ipfs_hash.is_empty(), "IPFS hash required");
         assert!(
             guardians_list.len() == shares.len(),
             "Guardians list and shares count mismatch"
         );
 
-        let doc_count: u64 = env.storage().instance().get(&DataKey::DocCount).unwrap_or(0);
+        let doc_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DocCount)
+            .unwrap_or(0);
         let next_doc_id = doc_count + 1;
-        env.storage().instance().set(&DataKey::DocCount, &next_doc_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::DocCount, &next_doc_id);
 
         let doc = Document {
             id: next_doc_id,
@@ -439,29 +491,28 @@ impl SpooVaultStellar {
             required_access,
         };
 
-        let doc_key = DataKey::Doc(next_doc_id);
-        let rel_key = DataKey::DocReleaseCond(next_doc_id);
-        let access_key = DataKey::HasAccess(next_doc_id, uploader.clone());
-        let lvl_key = DataKey::AccessLvl(next_doc_id, uploader);
+        // Pack document, release condition, per-user access grants and
+        // per-guardian shares into a single storage key.
+        let mut access: Map<Address, AccessLevel> = Map::new(&env);
+        access.set(uploader.clone(), required_access);
 
-        env.storage().persistent().set(&doc_key, &doc);
-        env.storage().persistent().set(&rel_key, &release_condition);
-        env.storage().persistent().set(&access_key, &true);
-        env.storage().persistent().set(&lvl_key, &required_access);
-
-        Self::bump_persistent(&env, &doc_key);
-        Self::bump_persistent(&env, &rel_key);
-        Self::bump_persistent(&env, &access_key);
-        Self::bump_persistent(&env, &lvl_key);
-
-        // Store guardian shares
+        let mut share_map: Map<Address, String> = Map::new(&env);
         for i in 0..guardians_list.len() {
             let guardian = guardians_list.get(i).unwrap();
             let share = shares.get(i).unwrap();
-            let gshare_key = DataKey::GShare(next_doc_id, guardian);
-            env.storage().persistent().set(&gshare_key, &share);
-            Self::bump_persistent(&env, &gshare_key);
+            share_map.set(guardian, share);
         }
+
+        let doc_record = DocumentRecord {
+            document: doc,
+            release_condition,
+            access,
+            shares: share_map,
+        };
+
+        let doc_key = DataKey::DocumentRecord(next_doc_id);
+        env.storage().persistent().set(&doc_key, &doc_record);
+        Self::bump_persistent(&env, &doc_key);
 
         next_doc_id
     }
@@ -471,54 +522,53 @@ impl SpooVaultStellar {
         requester.require_auth();
         Self::bump_instance(&env);
 
-        let doc_key = DataKey::Doc(document_id);
-        let doc: Document = env
+        let doc_key = DataKey::DocumentRecord(document_id);
+        let doc_record: DocumentRecord = env
             .storage()
             .persistent()
             .get(&doc_key)
             .expect("Document not found");
         Self::bump_persistent(&env, &doc_key);
 
-        let has_acc: bool = env
-            .storage()
-            .persistent()
-            .get(&DataKey::HasAccess(document_id, requester.clone()))
-            .unwrap_or(false);
-        assert!(!has_acc, "Already has access");
+        assert!(
+            !doc_record.access.contains_key(requester.clone()),
+            "Already has access"
+        );
 
         // Verify release condition
-        let cond: ReleaseCondition = env
-            .storage()
-            .persistent()
-            .get(&DataKey::DocReleaseCond(document_id))
-            .unwrap_or(ReleaseCondition::Anytime);
-
         assert!(
-            Self::is_release_condition_satisfied(&env, doc.vault_id, cond),
+            Self::is_release_condition_satisfied(
+                &env,
+                doc_record.document.vault_id,
+                doc_record.release_condition
+            ),
             "Release condition locked"
         );
 
-        let req_count: u64 = env.storage().instance().get(&DataKey::ReqCount).unwrap_or(0);
+        let req_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReqCount)
+            .unwrap_or(0);
         let next_req_id = req_count + 1;
-        env.storage().instance().set(&DataKey::ReqCount, &next_req_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::ReqCount, &next_req_id);
 
         let access_req = AccessRequest {
             request_id: next_req_id,
             document_id,
             requester: requester.clone(),
             approved_by: Vec::new(&env),
+            beneficiary_shares: Map::new(&env),
             status: RequestStatus::Pending,
             expires_at: env.ledger().timestamp() + 3 * 24 * 60 * 60, // 3 days
             created_at: env.ledger().timestamp(),
         };
 
         let req_key = DataKey::Request(next_req_id);
-        let latest_req_key = DataKey::LatestReq(document_id, requester);
         env.storage().persistent().set(&req_key, &access_req);
-        env.storage().persistent().set(&latest_req_key, &next_req_id);
-
         Self::bump_persistent(&env, &req_key);
-        Self::bump_persistent(&env, &latest_req_key);
 
         next_req_id
     }
@@ -548,59 +598,58 @@ impl SpooVaultStellar {
             "Request expired"
         );
 
-        let doc_key = DataKey::Doc(request.document_id);
-        let doc: Document = env
+        let doc_key = DataKey::DocumentRecord(request.document_id);
+        let mut doc_record: DocumentRecord = env
             .storage()
             .persistent()
             .get(&doc_key)
             .expect("Document not found");
 
-        let vault_key = DataKey::Vault(doc.vault_id);
-        let vault: Vault = env
+        let record_key = DataKey::VaultRecord(doc_record.document.vault_id);
+        let record: VaultRecord = env
             .storage()
             .persistent()
-            .get(&vault_key)
+            .get(&record_key)
             .expect("Vault not found");
 
-        let is_guard_key = DataKey::IsGuardian(doc.vault_id, approver.clone());
-        let is_guard: bool = env
-            .storage()
-            .persistent()
-            .get(&is_guard_key)
-            .unwrap_or(false);
-        assert!(is_guard, "Only guardians can approve access");
+        assert!(
+            Self::is_guardian_in_vault(&record.vault, &approver),
+            "Only guardians can approve access"
+        );
 
-        let approved_req_key = DataKey::ApprovedReq(request_id, approver.clone());
-        let already_approved: bool = env
-            .storage()
-            .persistent()
-            .get(&approved_req_key)
-            .unwrap_or(false);
-        assert!(!already_approved, "Already approved");
-
-        env.storage().persistent().set(&approved_req_key, &true);
-        Self::bump_persistent(&env, &approved_req_key);
+        // Approval is derivable from the packed `approved_by` list.
+        assert!(!request.approved_by.contains(&approver), "Already approved");
 
         request.approved_by.push_back(approver.clone());
 
         if let Some(share) = beneficiary_share {
-            let bshare_key = DataKey::BShare(request_id, approver);
-            env.storage().persistent().set(&bshare_key, &share);
-            Self::bump_persistent(&env, &bshare_key);
+            request.beneficiary_shares.set(approver, share);
         }
 
-        if request.approved_by.len() >= vault.approval_threshold {
+        if request.approved_by.len() >= record.vault.approval_threshold {
             request.status = RequestStatus::Approved;
-            let acc_key = DataKey::HasAccess(request.document_id, request.requester.clone());
-            let lvl_key = DataKey::AccessLvl(request.document_id, request.requester.clone());
-            env.storage().persistent().set(&acc_key, &true);
-            env.storage().persistent().set(&lvl_key, &doc.required_access);
-            Self::bump_persistent(&env, &acc_key);
-            Self::bump_persistent(&env, &lvl_key);
+            // Grant access at the document's required level, packed into the
+            // single DocumentRecord key (replacing the old HasAccess/AccessLvl keys).
+            doc_record
+                .access
+                .set(request.requester.clone(), doc_record.document.required_access);
+
+            let registry_key = DataKey::AccessRegistry(doc_record.document.vault_id);
+            if let Some(registry) = env.storage().persistent().get::<_, Address>(&registry_key) {
+                Self::bump_persistent(&env, &registry_key);
+                Self::notify_access_registry(
+                    &env,
+                    &registry,
+                    request.document_id,
+                    &request.requester,
+                );
+            }
         }
 
         env.storage().persistent().set(&req_key, &request);
+        env.storage().persistent().set(&doc_key, &doc_record);
         Self::bump_persistent(&env, &req_key);
+        Self::bump_persistent(&env, &doc_key);
     }
 
     /// Record proof of life for inactivity check
@@ -608,26 +657,22 @@ impl SpooVaultStellar {
         owner.require_auth();
         Self::bump_instance(&env);
 
-        let vault_key = DataKey::Vault(vault_id);
-        let vault: Vault = env
+        let record_key = DataKey::VaultRecord(vault_id);
+        let mut record: VaultRecord = env
             .storage()
             .persistent()
-            .get(&vault_key)
+            .get(&record_key)
             .expect("Vault not found");
-        assert!(vault.creator == owner, "Only creator can record proof of life");
-        assert!(vault.is_active, "Vault not active");
+        assert!(
+            record.vault.creator == owner,
+            "Only creator can record proof of life"
+        );
+        assert!(record.vault.is_active, "Vault not active");
 
-        let rel_key = DataKey::ReleaseState(vault_id);
-        let mut state: VaultReleaseState = env
-            .storage()
-            .persistent()
-            .get(&rel_key)
-            .unwrap();
-        state.last_proof_of_life = env.ledger().timestamp();
-        env.storage().persistent().set(&rel_key, &state);
+        record.release_state.last_proof_of_life = env.ledger().timestamp();
+        env.storage().persistent().set(&record_key, &record);
 
-        Self::bump_persistent(&env, &vault_key);
-        Self::bump_persistent(&env, &rel_key);
+        Self::bump_persistent(&env, &record_key);
     }
 
     /// Configure vault release conditions
@@ -640,30 +685,26 @@ impl SpooVaultStellar {
         owner.require_auth();
         Self::bump_instance(&env);
 
-        let vault_key = DataKey::Vault(vault_id);
-        let vault: Vault = env
+        let record_key = DataKey::VaultRecord(vault_id);
+        let mut record: VaultRecord = env
             .storage()
             .persistent()
-            .get(&vault_key)
+            .get(&record_key)
             .expect("Vault not found");
-        assert!(vault.creator == owner, "Only creator can configure release");
-        assert!(vault.is_active, "Vault not active");
         assert!(
-            inactivity_period >= 24 * 60 * 60 && inactivity_period <= 365 * 24 * 60 * 60,
+            record.vault.creator == owner,
+            "Only creator can configure release"
+        );
+        assert!(record.vault.is_active, "Vault not active");
+        assert!(
+            (24 * 60 * 60..=365 * 24 * 60 * 60).contains(&inactivity_period),
             "Inactivity period must be between 1 and 365 days"
         );
 
-        let rel_key = DataKey::ReleaseState(vault_id);
-        let mut state: VaultReleaseState = env
-            .storage()
-            .persistent()
-            .get(&rel_key)
-            .unwrap();
-        state.inactivity_period = inactivity_period;
-        env.storage().persistent().set(&rel_key, &state);
+        record.release_state.inactivity_period = inactivity_period;
+        env.storage().persistent().set(&record_key, &record);
 
-        Self::bump_persistent(&env, &vault_key);
-        Self::bump_persistent(&env, &rel_key);
+        Self::bump_persistent(&env, &record_key);
     }
 
     /// Set vault emergency mode
@@ -671,26 +712,47 @@ impl SpooVaultStellar {
         owner.require_auth();
         Self::bump_instance(&env);
 
-        let vault_key = DataKey::Vault(vault_id);
-        let vault: Vault = env
+        let record_key = DataKey::VaultRecord(vault_id);
+        let mut record: VaultRecord = env
+            .storage()
+            .persistent()
+            .get(&record_key)
+            .expect("Vault not found");
+        assert!(
+            record.vault.creator == owner,
+            "Only creator can set emergency mode"
+        );
+        assert!(record.vault.is_active, "Vault not active");
+
+        record.release_state.emergency_mode = enabled;
+        env.storage().persistent().set(&record_key, &record);
+
+        Self::bump_persistent(&env, &record_key);
+    }
+
+    /// Configure an optional external registry contract to be notified whenever
+    /// a document access request on this vault is fully approved. The registry
+    /// may be any Soroban contract (e.g. an audit log or a custom account's
+    /// policy contract) - `Address` does not distinguish between a raw Stellar
+    /// keypair account and a deployed contract address, so both are accepted.
+    pub fn set_access_registry(env: Env, owner: Address, vault_id: u64, registry: Address) {
+        owner.require_auth();
+        Self::bump_instance(&env);
+
+        let vault_key = DataKey::VaultRecord(vault_id);
+        let record: VaultRecord = env
             .storage()
             .persistent()
             .get(&vault_key)
             .expect("Vault not found");
-        assert!(vault.creator == owner, "Only creator can set emergency mode");
-        assert!(vault.is_active, "Vault not active");
+        assert!(
+            record.vault.creator == owner,
+            "Only creator can set access registry"
+        );
 
-        let rel_key = DataKey::ReleaseState(vault_id);
-        let mut state: VaultReleaseState = env
-            .storage()
-            .persistent()
-            .get(&rel_key)
-            .unwrap();
-        state.emergency_mode = enabled;
-        env.storage().persistent().set(&rel_key, &state);
-
-        Self::bump_persistent(&env, &vault_key);
-        Self::bump_persistent(&env, &rel_key);
+        let registry_key = DataKey::AccessRegistry(vault_id);
+        env.storage().persistent().set(&registry_key, &registry);
+        Self::bump_persistent(&env, &registry_key);
     }
 
     /// Helper function to check if release condition is satisfied
@@ -703,15 +765,17 @@ impl SpooVaultStellar {
             return true;
         }
 
-        let rel_key = DataKey::ReleaseState(vault_id);
-        let state: VaultReleaseState = env
+        let record_key = DataKey::VaultRecord(vault_id);
+        let record: VaultRecord = env
             .storage()
             .persistent()
-            .get(&rel_key)
+            .get(&record_key)
             .expect("Vault state missing");
-        Self::bump_persistent(env, &rel_key);
+        Self::bump_persistent(env, &record_key);
 
-        let is_dead = env.ledger().timestamp() >= state.last_proof_of_life + state.inactivity_period;
+        let state = record.release_state;
+        let is_dead =
+            env.ledger().timestamp() >= state.last_proof_of_life + state.inactivity_period;
 
         match condition {
             ReleaseCondition::LiveOnly => !is_dead,
@@ -723,22 +787,22 @@ impl SpooVaultStellar {
 
     pub fn get_vault(env: Env, vault_id: u64) -> Option<Vault> {
         Self::bump_instance(&env);
-        let key = DataKey::Vault(vault_id);
-        let vault: Option<Vault> = env.storage().persistent().get(&key);
-        if vault.is_some() {
+        let key = DataKey::VaultRecord(vault_id);
+        let record: Option<VaultRecord> = env.storage().persistent().get(&key);
+        if record.is_some() {
             Self::bump_persistent(&env, &key);
         }
-        vault
+        record.map(|r| r.vault)
     }
 
     pub fn get_document(env: Env, document_id: u64) -> Option<Document> {
         Self::bump_instance(&env);
-        let key = DataKey::Doc(document_id);
-        let doc: Option<Document> = env.storage().persistent().get(&key);
-        if doc.is_some() {
+        let key = DataKey::DocumentRecord(document_id);
+        let record: Option<DocumentRecord> = env.storage().persistent().get(&key);
+        if record.is_some() {
             Self::bump_persistent(&env, &key);
         }
-        doc
+        record.map(|r| r.document)
     }
 
     pub fn get_access_request(env: Env, request_id: u64) -> Option<AccessRequest> {
@@ -767,12 +831,43 @@ impl SpooVaultStellar {
 
     pub fn get_release_state(env: Env, vault_id: u64) -> Option<VaultReleaseState> {
         Self::bump_instance(&env);
-        let key = DataKey::ReleaseState(vault_id);
-        let state: Option<VaultReleaseState> = env.storage().persistent().get(&key);
-        if state.is_some() {
+        let key = DataKey::VaultRecord(vault_id);
+        let record: Option<VaultRecord> = env.storage().persistent().get(&key);
+        if record.is_some() {
             Self::bump_persistent(&env, &key);
         }
-        state
+        record.map(|r| r.release_state)
+    }
+
+    /// Perform a deep, contract-authorized cross-contract call notifying an
+    /// external registry that document access was granted.
+    ///
+    /// The vault contract itself - rather than the approving guardian - is the
+    /// one invoking the registry, so the guardian's signature (verified above
+    /// via `require_auth`) does not cover this sub-invocation. We use
+    /// `env.authorize_as_current_contract` to have this contract authorize the
+    /// call to `record_grant` "as itself" for exactly this invocation, which
+    /// is required for the sub-invocation to pass the registry's own
+    /// `require_auth` / custom-account `__check_auth` checks regardless of
+    /// whether the registry is a plain account or a custom account
+    /// abstraction (multisig / policy) contract.
+    fn notify_access_registry(env: &Env, registry: &Address, document_id: u64, requester: &Address) {
+        let fn_name = Symbol::new(env, "record_grant");
+        let args: Vec<Val> = (document_id, requester.clone()).into_val(env);
+
+        env.authorize_as_current_contract(soroban_sdk::vec![
+            env,
+            InvokerContractAuthEntry::Contract(SubContractInvocation {
+                context: ContractContext {
+                    contract: registry.clone(),
+                    fn_name: fn_name.clone(),
+                    args: args.clone(),
+                },
+                sub_invocations: Vec::new(env),
+            }),
+        ]);
+
+        let _: Val = env.invoke_contract(registry, &fn_name, args);
     }
 
     // Helper functions for TTL management
@@ -783,10 +878,19 @@ impl SpooVaultStellar {
     }
 
     fn bump_persistent(env: &Env, key: &DataKey) {
-        env.storage()
-            .persistent()
-            .extend_ttl(key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        env.storage().persistent().extend_ttl(
+            key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Returns true when `addr` is a guardian of `vault`, derived from the
+    /// packed guardian list instead of a dedicated per-guardian storage key.
+    fn is_guardian_in_vault(vault: &Vault, addr: &Address) -> bool {
+        vault.guardians.contains(addr)
     }
 }
 
+#[cfg(test)]
 mod test;
