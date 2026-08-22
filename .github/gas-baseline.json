@@ -1,9 +1,9 @@
 {
   "version": 2,
   "compilerFingerprint": "bf393b2ba114",
-  "updatedAt": "2026-08-22T09:05:10.720Z",
+  "updatedAt": "2026-08-22T09:14:21.975Z",
   "gas": {
-    "CrossChainIdentityRegistry.bindIdentity": 1537370,
+    "CrossChainIdentityRegistry.bindIdentity": 1530867,
     "ERC6551Registry.createAccount": 131636,
     "SpooAccountImplementation.executeCall": 96365,
     "SpooVault.acceptGuardianInvite": 104192,
