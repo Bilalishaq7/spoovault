@@ -20,6 +20,7 @@ import {
   GuardianInviteData,
 } from "../services/contract.service";
 import { clientKeyringService } from "../services/clientKeyring.service";
+import { identityService, IdentityBinding } from "../services/identity.service";
 
 interface InviteVaultContext {
   name: string;
