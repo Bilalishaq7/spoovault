@@ -1,0 +1,17 @@
+# Echidna campaign configuration for the SpooVault differential fuzzing suite.
+# See https://github.com/crytic/echidna/wiki/Configuration
+testMode: property
+testLimit: 100000
+seqLen: 100
+corpusDir: "/tmp/echidna-corpus"
+# Pin the solc version explicitly. The echidna image ships `solc` as a
+# solc-select shim with no version pre-selected, so we install+select it
+# in the CI run command.
+solcVersion: "0.8.24"
+coverage: false
+# Echidna will only attempt to break `echidna_*` properties.
+format: text
+# Increase the number of transactions attempted per fuzzing campaign.
+maxFuzzSpaceSize: 100000
+# Stop early if a property is violated.
+stopOnFail: true
