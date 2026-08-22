@@ -46,13 +46,21 @@ jobs:
       - name: Install Medusa
         run: go install github.com/crytic/medusa@latest
 
+      - name: Install crytic-compile and solc
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pip install crytic-compile solc-select
+          solc-select install 0.8.24
+          solc-select use 0.8.24
+
       - name: Install dependencies (for OpenZeppelin imports)
         run: npm install --legacy-peer-deps
 
       - name: Run Medusa campaign
         run: |
           export PATH="$HOME/go/bin:$PATH"
-          medusa fuzz --config fuzz/medusa/medusa.json
+          cd fuzz/medusa && medusa fuzz --config medusa.json
 
   soroban-fuzz:
     name: Soroban proptest (cargo-fuzz / proptest)

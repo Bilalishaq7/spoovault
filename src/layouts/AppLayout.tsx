@@ -101,6 +101,7 @@ const AppLayout = () => {
     { path: "/vaults", label: "Vaults", icon: FiShield },
     { path: "/documents", label: "Docs", icon: FiFile },
     { path: "/access", label: "Access", icon: FiUnlock },
+    { path: "/nfts", label: "Passes", icon: FiKey },
     { path: "/docs", label: "Guide", icon: FiBook },
   ];
 
