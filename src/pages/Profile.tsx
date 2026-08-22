@@ -26,6 +26,7 @@ const Profile = () => {
   const [publicKey, setPublicKey] = useState("");
   const [isRegisteredOnChain, setIsRegisteredOnChain] = useState(false);
   const [hasLocalKey, setHasLocalKey] = useState(false);
+  const [hasPasskey, setHasPasskey] = useState(false);
   const [checkingKey, setCheckingKey] = useState(false);
   const [registeringKey, setRegisteringKey] = useState(false);
   const [crossChainEvm, setCrossChainEvm] = useState("");
@@ -92,6 +93,7 @@ const Profile = () => {
       setPublicKey("");
       setIsRegisteredOnChain(false);
       setHasLocalKey(false);
+      setHasPasskey(false);
       return;
     }
     setCheckingKey(true);
@@ -101,13 +103,16 @@ const Profile = () => {
       if (isFujiNetwork) {
         onChainKey = await contractService.getUserPublicKey(account);
       }
+      const record = await clientKeyringService.getKeyPairRecord(account);
       setHasLocalKey(!!localKey);
+      setHasPasskey(!!record?.hasPasskey);
       setIsRegisteredOnChain(!!onChainKey && onChainKey.trim().length > 0);
       setPublicKey(onChainKey || localKey || "");
     } catch {
       setPublicKey("");
       setIsRegisteredOnChain(false);
       setHasLocalKey(false);
+      setHasPasskey(false);
     } finally {
       setCheckingKey(false);
     }
@@ -123,6 +128,7 @@ const Profile = () => {
       setPublicKey("");
       setIsRegisteredOnChain(false);
       setHasLocalKey(false);
+      setHasPasskey(false);
     }
   }, [account, isConnected, provider, signer, isFujiNetwork]);
 
@@ -236,8 +242,10 @@ const Profile = () => {
         toast.success("Encryption key generated securely in browser IndexedDB!");
       }
 
+      const record = await clientKeyringService.getKeyPairRecord(account);
       setPublicKey(pubKey);
       setHasLocalKey(true);
+      setHasPasskey(!!record?.hasPasskey);
       setPin("");
       setShowPinInput(false);
     } catch (error: any) {
@@ -349,6 +357,11 @@ const Profile = () => {
                       SECURED IN INDEXEDDB
                     </Chip>
                   )}
+                  {hasPasskey && (
+                    <Chip color="success" variant="flat" size="sm">
+                      PASSKEY PROTECTED
+                    </Chip>
+                  )}
                 </div>
                 <p className="text-xs text-gray-400 font-mono break-all line-clamp-3">
                   {publicKey}
@@ -396,6 +409,8 @@ const Profile = () => {
                 </Chip>
                 <p className="text-xs text-gray-400">
                   Generate a client-side Web Crypto ECIES (ECDH P-256) keypair stored securely in browser IndexedDB.
+                  When a hardware authenticator is available, the keyring can be unlocked with
+                  TouchID / FaceID / YubiKey via WebAuthn passkeys.
                 </p>
 
                 {showPinInput ? (

@@ -6,6 +6,18 @@ import {
 } from "../utils/crypto";
 
 import { secretsService, PBKDF2_ITERATIONS } from "./secrets.service";
+import {
+  WebAuthnError,
+  authenticatePasskey,
+  decryptWithPrfKey,
+  deriveAesKeyFromPrfOutput,
+  encryptWithPrfKey,
+  generateChallenge,
+  generatePrfSalt,
+  getRelyingPartyId,
+  isWebAuthnAvailable,
+  registerPasskey,
+} from "./webauthn.service";
 
 export interface KeyPairRecord {
   account: string;
@@ -14,6 +26,14 @@ export interface KeyPairRecord {
   createdAt: number;
   updatedAt: number;
   hasPin: boolean;
+  /** Whether a hardware-backed WebAuthn passkey (TouchID / FaceID / YubiKey) protects this keyring. */
+  hasPasskey?: boolean;
+  /** Base64url WebAuthn credential id used to re-authenticate with the hardware authenticator. */
+  passkeyCredentialId?: string;
+  /** Base64url PRF eval salt — public, but required (with the authenticator secret) to re-derive the key. */
+  passkeyPrfSalt?: string;
+  /** Private key encrypted with the AES key derived from the authenticator's PRF output. */
+  passkeyEncryptedPrivateKey?: string;
   /**
    * Zero-Knowledge Password Proof envelope (issue #151). When present, the
    * private key is wrapped under a key derived from the PIN *and* an OPRF
@@ -28,6 +48,18 @@ export interface KeyPairRecord {
    * useless for brute-forcing the PIN.
    */
   oprfKey?: CryptoKey;
+}
+
+/**
+ * Options for keypair generation.
+ */
+export interface GenerateKeyPairOptions {
+  /**
+   * Attempt to register a hardware-backed WebAuthn passkey (PRF extension) during keyring
+   * creation. Defaults to `true`; falls back to PIN/passphrase protection when WebAuthn is
+   * unavailable, unsupported, or the user cancels.
+   */
+  enablePasskey?: boolean;
 }
 
 /**
@@ -494,6 +526,116 @@ const idbGetAllKeys = async (): Promise<string[]> => {
   }
 };
 
+const PASSKEY_RP_NAME = "SpooVault";
+
+/**
+ * Base64url helpers (kept local so the service has no dependency on the WebAuthn payload format).
+ */
+const bytesToBase64Url = (bytes: Uint8Array): string => {
+  let binary = "";
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+
+const base64UrlToBytes = (value: string): Uint8Array => {
+  let b64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4 !== 0) {
+    b64 += "=";
+  }
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+};
+
+interface PasskeyProtection {
+  credentialId: string;
+  prfSalt: string;
+  encryptedPrivateKey: string;
+}
+
+/**
+ * Register a hardware-backed WebAuthn passkey (TouchID / FaceID / YubiKey) with the PRF
+ * extension enabled and encrypt `privateKey` with the derived hardware key.
+ *
+ * Returns `null` (never throws) when WebAuthn is unavailable, the authenticator does not
+ * support PRF, or the user cancels — the caller then falls back to PIN/passphrase protection.
+ */
+const createPasskeyProtection = async (
+  account: string,
+  privateKey: string
+): Promise<PasskeyProtection | null> => {
+  if (!isWebAuthnAvailable()) {
+    return null;
+  }
+
+  const rpId = getRelyingPartyId();
+  const prfSalt = generatePrfSalt();
+
+  try {
+    const registration = await registerPasskey({
+      rpId,
+      rpName: PASSKEY_RP_NAME,
+      userName: account,
+      userDisplayName: account,
+      challenge: generateChallenge(),
+      prfSalt,
+    });
+
+    if (!registration.prfEnabled) {
+      // Authenticator does not support the PRF extension, so no hardware-backed key can
+      // be derived. Fall back to PIN/passphrase protection.
+      return null;
+    }
+
+    // Most authenticators only return the PRF output on *authentication*, so issue a
+    // follow-up assertion with the same salt to obtain the derived bytes.
+    let prfOutput = registration.prfOutput;
+    if (!prfOutput) {
+      prfOutput = await authenticatePasskey({
+        rpId,
+        challenge: generateChallenge(),
+        prfSalt,
+        credentialId: registration.credentialId,
+      });
+    }
+
+    // Fold the PRF output into a non-extractable AES-256-GCM key and encrypt the private key.
+    const aesKey = await deriveAesKeyFromPrfOutput(prfOutput, prfSalt);
+    const encryptedPrivateKey = await encryptWithPrfKey(privateKey, aesKey);
+
+    return {
+      credentialId: registration.credentialId,
+      prfSalt: bytesToBase64Url(prfSalt),
+      encryptedPrivateKey,
+    };
+  } catch {
+    // Registration cancelled, PRF unsupported, or any other failure: fall back to
+    // PIN/passphrase protection so the user is never left without a working keyring.
+    return null;
+  }
+};
+
+/**
+ * Unlock a passkey-protected record by authenticating with the hardware authenticator
+ * and decrypting with the re-derived hardware key.
+ */
+const decryptRecordWithPasskey = async (record: KeyPairRecord): Promise<string> => {
+  const prfSalt = base64UrlToBytes(record.passkeyPrfSalt || "");
+  const prfOutput = await authenticatePasskey({
+    rpId: getRelyingPartyId(),
+    challenge: generateChallenge(),
+    prfSalt,
+    credentialId: record.passkeyCredentialId || undefined,
+  });
+  const aesKey = await deriveAesKeyFromPrfOutput(prfOutput, prfSalt);
+  return decryptWithPrfKey(record.passkeyEncryptedPrivateKey || "", aesKey);
+};
+
 export const clientKeyringService = {
   /**
    * Check if a keypair exists locally in IndexedDB for the given account.
@@ -503,7 +645,7 @@ export const clientKeyringService = {
     const record = await idbGet(account);
     return (
       !!record?.publicKey &&
-      (!!record?.encryptedPrivateKey || !!record?.zkpp)
+      (!!record?.encryptedPrivateKey || !!record?.passkeyEncryptedPrivateKey || !!record?.zkpp)
     );
   },
 
@@ -525,12 +667,14 @@ export const clientKeyringService = {
   },
 
   /**
-   * Generate a new Web Crypto ECDH P-256 keypair, encrypt the private key with user PIN/passphrase,
-   * and store in IndexedDB. Caches the unlocked private key in memory for the active session.
+   * Generate a new Web Crypto ECDH P-256 keypair, encrypt the private key with user PIN/passphrase
+   * and/or a hardware-backed WebAuthn passkey (TouchID / FaceID / YubiKey), and store in IndexedDB.
+   * Caches the unlocked private key in memory for the active session.
    */
   async generateAndSaveKeyPair(
     account: string,
-    pinOrPassphrase?: string
+    pinOrPassphrase?: string,
+    options: GenerateKeyPairOptions = {}
   ): Promise<{ publicKey: string }> {
     if (!account) {
       throw new Error("Account address is required to generate a keypair");
@@ -539,7 +683,24 @@ export const clientKeyringService = {
     const normalized = account.toLowerCase();
     const { publicKey, privateKey } = await generateECIESKeyPairBase64();
 
-    await persistKeyPair(normalized, publicKey, privateKey, pinOrPassphrase, null);
+    // Attempt to protect the keyring with a hardware-backed WebAuthn passkey (PRF extension).
+    const passkey =
+      options.enablePasskey !== false
+        ? await createPasskeyProtection(normalized, privateKey)
+        : null;
+
+    const existing = await idbGet(normalized);
+    const updatedRecord = await persistKeyPair(normalized, publicKey, privateKey, pinOrPassphrase, existing);
+
+    if (passkey) {
+      updatedRecord.hasPasskey = true;
+      updatedRecord.passkeyCredentialId = passkey.credentialId;
+      updatedRecord.passkeyPrfSalt = passkey.prfSalt;
+      updatedRecord.passkeyEncryptedPrivateKey = passkey.encryptedPrivateKey;
+      await idbPut(updatedRecord);
+    }
+
+    sessionKeyCache.set(normalized, privateKey);
 
     return { publicKey };
   },
@@ -571,6 +732,10 @@ export const clientKeyringService = {
   /**
    * Retrieve and decrypt the client-side private key (Base64 PKCS#8) from IndexedDB.
    * If already unlocked in session cache, returns immediately.
+   *
+   * For passkey-protected keyrings, unlock happens via the hardware authenticator
+   * (TouchID / FaceID / YubiKey) when no PIN is supplied; a supplied PIN/passphrase
+   * decrypts the PIN-encrypted fallback blob or ZKPP envelope instead.
    */
   async getDecryptedPrivateKey(
     account: string,
@@ -587,10 +752,42 @@ export const clientKeyringService = {
     }
 
     const record = await idbGet(normalized);
-    if (!record || (!record.encryptedPrivateKey && !record.zkpp)) {
+    if (!record || (!record.encryptedPrivateKey && !record.passkeyEncryptedPrivateKey && !record.zkpp)) {
       throw new Error(
         `No local encryption keypair found for wallet ${account}. Please generate one in your Profile page.`
       );
+    }
+
+    const trimmedPin = pinOrPassphrase?.trim();
+
+    // Hardware-backed unlock path (TouchID / FaceID / YubiKey) via the WebAuthn PRF extension.
+    if (
+      !trimmedPin &&
+      record.hasPasskey &&
+      record.passkeyCredentialId &&
+      record.passkeyPrfSalt &&
+      record.passkeyEncryptedPrivateKey
+    ) {
+      try {
+        const privateKey = await decryptRecordWithPasskey(record);
+        sessionKeyCache.set(normalized, privateKey);
+        return privateKey;
+      } catch (err) {
+        const cancelled = err instanceof WebAuthnError && err.code === "NOT_ALLOWED";
+        if (record.hasPin && (record.encryptedPrivateKey || record.zkpp)) {
+          // Smooth fallback: the keyring also has a PIN-encrypted copy / ZKPP envelope.
+          throw new Error(
+            cancelled
+              ? "Passkey authentication cancelled. Unlock with your PIN/passphrase instead."
+              : "Passkey authentication failed. Unlock with your PIN/passphrase instead."
+          );
+        }
+        throw new Error(
+          cancelled
+            ? "Passkey authentication cancelled. Please try again when you are ready to unlock."
+            : "Passkey authentication failed. Please verify your hardware authenticator."
+        );
+      }
     }
 
     const privateKey = await unlockRecord(record, pinOrPassphrase);

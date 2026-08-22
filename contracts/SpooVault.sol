@@ -82,6 +82,7 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         bool emergencyMode;
         uint256 inactivityPeriod;
         uint256 lastProofOfLife;
+        uint256 lastProofOfLifeBlock;
     }
 
     struct GuardianRemovalProposal {
@@ -103,6 +104,13 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         uint256 createdAt;
         uint256 expiresAt;
     }
+
+    /// @dev Minimum number of blocks that must elapse since the last proof of
+    /// life before post-death conditions can unlock, in addition to the
+    /// timestamp threshold. Guards against miners/validators nudging
+    /// `block.timestamp` within their permitted drift window to trigger an
+    /// early release without real block progression having occurred.
+    uint256 public constant MIN_POST_DEATH_BLOCK_DELTA = 256;
 
     error AtLeastOneGuardian();
     error InvalidApprovalThreshold();
@@ -271,7 +279,8 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         _vaultReleaseStates[vaultId] = VaultReleaseState({
             emergencyMode: false,
             inactivityPeriod: 30 days,
-            lastProofOfLife: block.timestamp
+            lastProofOfLife: block.timestamp,
+            lastProofOfLifeBlock: block.number
         });
 
         newVault.guardians.push(msg.sender);
@@ -434,12 +443,19 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         if (!vaults[vaultId].isActive) revert VaultNotActive();
 
         _vaultReleaseStates[vaultId].lastProofOfLife = block.timestamp;
+        _vaultReleaseStates[vaultId].lastProofOfLifeBlock = block.number;
         emit ProofOfLifeRecorded(vaultId, msg.sender, block.timestamp, getVaultGID(vaultId));
     }
 
     /// @notice Returns the stable cross-chain identifier for an EVM vault.
     function getVaultGID(uint256 vaultId) public view returns (string memory) {
-        return string.concat(block.chainid.toString(), ":", Strings.toHexString(address(this)), ":", vaultId.toString());
+        return string.concat(
+            block.chainid.toString(),
+            ":",
+            Strings.toHexString(address(this)),
+            ":",
+            vaultId.toString()
+        );
     }
 
     /**
@@ -659,6 +675,18 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
 
         isGuardian[vaultId][guardianToRemove] = false;
         emit GuardianRemoved(vaultId, guardianToRemove);
+    }
+
+    /**
+     * @dev Blocks elapsed since the last recorded proof of life for a vault.
+     */
+    function getBlocksSinceProofOfLife(uint256 vaultId) external view returns (uint256) {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        VaultReleaseState storage state = _vaultReleaseStates[vaultId];
+        if (block.number <= state.lastProofOfLifeBlock) {
+            return 0;
+        }
+        return block.number - state.lastProofOfLifeBlock;
     }
 
     function _addDocument(
@@ -1052,7 +1080,11 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         if (state.inactivityPeriod == 0) {
             return false;
         }
-        return block.timestamp >= state.lastProofOfLife + state.inactivityPeriod;
+
+        bool timestampExpired = block.timestamp >= state.lastProofOfLife + state.inactivityPeriod;
+        bool blocksElapsed = block.number >= state.lastProofOfLifeBlock + MIN_POST_DEATH_BLOCK_DELTA;
+
+        return timestampExpired && blocksElapsed;
     }
 
     function _isReleaseConditionSatisfied(uint256 documentId) internal view returns (bool) {
