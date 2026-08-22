@@ -174,6 +174,12 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     // broadcasts. Lets a relayed message be replay-protected on the receiving
     // chain independent of any chain-specific block/ledger sequencing.
     mapping(uint256 => mapping(address => uint256)) public documentRevocationNonce;
+
+    // Opt-in per vault: most vaults are single-chain and should not pay the
+    // extra SSTORE/event gas cost of cross-chain revocation broadcasting on
+    // every revokeAccess call. Only vaults linked to a Soroban counterpart
+    // (via link_cross_chain_vault) need this enabled.
+    mapping(uint256 => bool) public crossChainRevocationEnabled;
     mapping(uint256 => VaultReleaseState) private _vaultReleaseStates;
 
     // Guardian rotation and threshold adjustment governance
@@ -810,12 +816,15 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     }
 
     /**
-     * @dev Revoke access from user for a specific document. Also emits a
-     *      cross-chain revocation broadcast payload (vaultGID, documentId,
-     *      targetUser, nonce) that a relayer can have the calling guardian
-     *      sign and forward to the linked Soroban vault via
-     *      `relay_revoke_access`, closing the window where a still-cached
-     *      Stellar-side grant could be used after this EVM-side revocation.
+     * @dev Revoke access from user for a specific document. If the vault has
+     *      opted into cross-chain revocation via `setCrossChainRevocationEnabled`,
+     *      also emits a broadcast payload (vaultGID, documentId, targetUser,
+     *      nonce) that a relayer can have the calling guardian sign and
+     *      forward to the linked Soroban vault via `relay_revoke_access`,
+     *      closing the window where a still-cached Stellar-side grant could
+     *      be used after this EVM-side revocation. Disabled by default so
+     *      single-chain vaults don't pay for broadcast infrastructure they
+     *      never use.
      */
     function revokeAccess(uint256 documentId, address user) external nonReentrant {
         if (documents[documentId].id == 0) revert DocumentNotExist();
@@ -827,10 +836,12 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         delete userAccessLevel[documentId][user];
         delete _documentAccessVersion[documentId][user];
 
-        uint256 nonce = ++documentRevocationNonce[documentId][user];
-
         emit AccessRevoked(documentId, user);
-        emit CrossChainRevocationBroadcast(vaultGID(vaultId), documentId, user, nonce);
+
+        if (crossChainRevocationEnabled[vaultId]) {
+            uint256 nonce = ++documentRevocationNonce[documentId][user];
+            emit CrossChainRevocationBroadcast(vaultGID(vaultId), documentId, user, nonce);
+        }
     }
 
     /// @notice Globally-unique cross-chain identifier for a vault, derived from
@@ -839,6 +850,18 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     ///         revocation broadcasts can be routed to the right vault.
     function vaultGID(uint256 vaultId) public view returns (bytes32) {
         return keccak256(abi.encodePacked(address(this), vaultId));
+    }
+
+    /// @notice Opt a vault into (or out of) cross-chain revocation broadcasting.
+    ///         Only the vault creator may toggle this; leave disabled (the
+    ///         default) for vaults with no linked Soroban counterpart so
+    ///         `revokeAccess` doesn't pay for broadcast infrastructure they
+    ///         never use.
+    function setCrossChainRevocationEnabled(uint256 vaultId, bool enabled) external nonReentrant {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
+
+        crossChainRevocationEnabled[vaultId] = enabled;
     }
 
     /**

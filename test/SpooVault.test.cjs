@@ -219,7 +219,22 @@ describe("SpooVault EVM Contract Unit Tests", function () {
       expect(await spooVault.hasActiveAccess(1, userA.address)).to.equal(false);
     });
 
-    it("emits CrossChainRevocationBroadcast with a strictly increasing nonce on each revoke", async function () {
+    it("is disabled by default and does not emit a broadcast or touch the nonce", async function () {
+      expect(await spooVault.crossChainRevocationEnabled(1)).to.equal(false);
+
+      await expect(spooVault.connect(guardian1).revokeAccess(1, userA.address))
+        .to.not.emit(spooVault, "CrossChainRevocationBroadcast");
+      expect(await spooVault.documentRevocationNonce(1, userA.address)).to.equal(0);
+    });
+
+    it("only the vault creator can enable cross-chain revocation broadcasting", async function () {
+      await expect(
+        spooVault.connect(guardian1).setCrossChainRevocationEnabled(1, true)
+      ).to.be.revertedWithCustomError(spooVault, "OnlyVaultCreator");
+    });
+
+    it("emits CrossChainRevocationBroadcast with a strictly increasing nonce once enabled", async function () {
+      await spooVault.connect(owner).setCrossChainRevocationEnabled(1, true);
       const gid = await spooVault.vaultGID(1);
 
       await expect(spooVault.connect(guardian1).revokeAccess(1, userA.address))
