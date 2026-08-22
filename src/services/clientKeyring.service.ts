@@ -1,8 +1,9 @@
 import {
-  base64ToUint8Array,
   generateECIESKeyPairBase64,
   importECIESPublicKey,
   importECIESPrivateKey,
+  uint8ArrayToString,
+  stringToUint8Array,
 } from "../utils/crypto";
 
 import { secretsService, PBKDF2_ITERATIONS } from "./secrets.service";
@@ -58,7 +59,32 @@ const DB_VERSION = 1;
 const STORE_NAME = "keypairs";
 
 // In-memory session cache for unlocked private keys during the active browser session
-const sessionKeyCache = new Map<string, string>();
+const sessionKeyCache = new Map<string, Uint8Array>();
+
+const cachePrivateKey = (account: string, privateKey: string): void => {
+  sessionKeyCache.set(account, stringToUint8Array(privateKey));
+};
+
+const readCachedPrivateKey = (account: string): string | null => {
+  const cached = sessionKeyCache.get(account);
+  return cached ? uint8ArrayToString(cached) : null;
+};
+
+const wipeCachedPrivateKey = (account: string): void => {
+  const cached = sessionKeyCache.get(account);
+  if (!cached) return;
+
+  const cryptoApi =
+    typeof globalThis !== "undefined" && globalThis.crypto
+      ? globalThis.crypto
+      : undefined;
+  if (cryptoApi) {
+    cryptoApi.getRandomValues(cached);
+  } else {
+    cached.fill(0);
+  }
+  sessionKeyCache.delete(account);
+};
 
 // Fallback in-memory store for environments without IndexedDB (e.g. Node tests without mock IDB)
 const memoryStore = new Map<string, KeyPairRecord>();
@@ -100,7 +126,7 @@ const persistKeyPair = async (
   };
 
   await idbPut(record);
-  sessionKeyCache.set(normalized, privateKey);
+  cachePrivateKey(normalized, privateKey);
 };
 
 const getEffectivePassphrase = (account: string, pinOrPassphrase?: string): { passphrase: string; isCustomPin: boolean } => {
@@ -581,7 +607,7 @@ export const clientKeyringService = {
     }
 
     const normalized = account.toLowerCase();
-    const cached = sessionKeyCache.get(normalized);
+    const cached = readCachedPrivateKey(normalized);
     if (cached) {
       return cached;
     }
@@ -594,7 +620,7 @@ export const clientKeyringService = {
     }
 
     const privateKey = await unlockRecord(record, pinOrPassphrase);
-    sessionKeyCache.set(normalized, privateKey);
+    cachePrivateKey(normalized, privateKey);
     return privateKey;
   },
 
@@ -611,7 +637,7 @@ export const clientKeyringService = {
    */
   lockAccount(account: string): void {
     if (account) {
-      sessionKeyCache.delete(account.toLowerCase());
+      wipeCachedPrivateKey(account.toLowerCase());
     }
   },
 
@@ -619,7 +645,9 @@ export const clientKeyringService = {
    * Clear all unlocked session keys from memory.
    */
   clearSessionCache(): void {
-    sessionKeyCache.clear();
+    for (const account of sessionKeyCache.keys()) {
+      wipeCachedPrivateKey(account);
+    }
   },
 
   /**
@@ -628,7 +656,7 @@ export const clientKeyringService = {
   async deleteKeyPair(account: string): Promise<void> {
     if (!account) return;
     const normalized = account.toLowerCase();
-    sessionKeyCache.delete(normalized);
+    wipeCachedPrivateKey(normalized);
     await idbDelete(normalized);
   },
 
@@ -738,12 +766,6 @@ export const clientKeyringService = {
    */
   getCachedPrivateKeyBytes(account: string): Uint8Array | null {
     if (!account) return null;
-    const cached = sessionKeyCache.get(account.toLowerCase());
-    if (!cached) return null;
-    try {
-      return base64ToUint8Array(cached);
-    } catch {
-      return null;
-    }
+    return sessionKeyCache.get(account.toLowerCase()) || null;
   },
 };
