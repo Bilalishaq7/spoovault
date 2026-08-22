@@ -75,14 +75,24 @@ export const formatDate = (timestamp: number): string => {
 };
 
 /**
- * Validate Stellar address (StrKey: G = Ed25519 Public Key, C = Contract ID)
+ * Validate EVM address format (0x...)
  */
-export const isValidStellarAddress = (address: string): boolean => {
-  return /^G[A-Z2-7]{55}$/.test(address) || /^C[A-Z2-7]{55}$/.test(address);
+export const isValidEVMAddress = (address: string): boolean => {
+  if (!address || typeof address !== "string") return false;
+  return /^0x[a-fA-F0-9]{40}$/.test(address.trim());
 };
 
 /**
- * Validate Ethereum address
+ * Validate Stellar address format (G... or C...)
+ */
+export const isValidStellarAddress = (address: string): boolean => {
+  if (!address || typeof address !== "string") return false;
+  const trimmed = address.trim();
+  return /^G[A-Z2-7]{55}$/.test(trimmed) || /^C[A-Z2-7]{55}$/.test(trimmed);
+};
+
+/**
+ * Validate address format on either EVM or Stellar networks
  */
 export const isValidAddress = (
   address: string,

@@ -1,5 +1,6 @@
 import { ethers } from "ethers";
 import { stellarService } from "./stellar.service";
+import { identityService } from "./identity.service";
 import { TtlCache } from "../utils/ttlCache";
 
 export interface VaultData {
@@ -2038,4 +2039,6 @@ export const contractService = {
   getUserPublicKey: proxiedGetUserPublicKey,
   getEncryptedGuardianShare: proxiedGetEncryptedGuardianShare,
   getBeneficiaryKeyShare: proxiedGetBeneficiaryKeyShare,
+  registerCrossChainIdentity: identityService.registerIdentity,
+  resolveCrossChainAddress: identityService.resolveAddressForNetwork,
 };

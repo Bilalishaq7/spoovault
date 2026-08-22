@@ -41,6 +41,8 @@ import {
   VaultData,
   VaultReleaseState,
 } from "../services/contract.service";
+import { shortenAddress, isValidMultiChainAddress, formatDate, getVaultGID, buildVaultDocumentCounts, keyRecordByVaultGID } from "../utils/helpers";
+import { identityService } from "../services/identity.service";
 import { toast } from "react-hot-toast";
 import {
   shortenAddress,
@@ -187,8 +189,9 @@ const Vaults = () => {
     }
   };
 
-  const handleAddGuardian = () => {
-    if (!formData.newGuardian.trim()) {
+  const handleAddGuardian = async () => {
+    const rawInput = formData.newGuardian.trim();
+    if (!rawInput) {
       toast.error("Please enter a guardian address");
       return;
     }
@@ -206,18 +209,32 @@ const Vaults = () => {
       return;
     }
 
-    if (formData.guardians.includes(formData.newGuardian)) {
+    let resolvedAddress = rawInput;
+    const targetNetwork = ecosystem === "stellar" ? "stellar" : "avalanche";
+
+    try {
+      resolvedAddress = await identityService.resolveAddressForNetwork(rawInput, targetNetwork);
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to resolve guardian address for network");
+      return;
+    }
+
+    if (formData.guardians.includes(resolvedAddress)) {
       toast.error("Guardian already added");
       return;
     }
 
     setFormData({
       ...formData,
-      guardians: [...formData.guardians, formData.newGuardian],
+      guardians: [...formData.guardians, resolvedAddress],
       newGuardian: "",
     });
 
-    toast.success("Guardian added");
+    if (resolvedAddress !== rawInput) {
+      toast.success(`Guardian resolved and added as ${shortenAddress(resolvedAddress, 6)}`);
+    } else {
+      toast.success("Guardian added");
+    }
   };
 
   const handleRemoveGuardian = (address: string) => {

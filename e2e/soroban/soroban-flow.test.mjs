@@ -35,8 +35,12 @@ const NETWORK_PASSPHRASE =
 const NETWORK = "spoovault-e2e";
 
 function runStellar(args, opts = {}) {
+  // Allow the binary location to be overridden (CI pins it to an absolute path
+  // because Node's spawn cannot always resolve `stellar` from PATH when a
+  // `cwd` is supplied to execFileSync).
+  const stellarBin = process.env.STELLAR_BIN || "stellar";
   try {
-    return execFileSync("stellar", args, {
+    return execFileSync(stellarBin, args, {
       encoding: "utf8",
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
       cwd: opts.cwd,
