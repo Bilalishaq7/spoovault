@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -63,5 +64,8 @@ export default defineConfig({
           chunkInfo.name === 'service-worker' ? 'sw.js' : 'assets/[name]-[hash].js',
       },
     },
+  },
+  test: {
+    pool: 'threads',
   }
 })

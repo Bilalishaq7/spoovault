@@ -80,6 +80,7 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         bool emergencyMode;
         uint256 inactivityPeriod;
         uint256 lastProofOfLife;
+        uint256 lastProofOfLifeBlock;
     }
 
     struct GuardianRemovalProposal {
@@ -101,6 +102,13 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         uint256 createdAt;
         uint256 expiresAt;
     }
+
+    /// @dev Minimum number of blocks that must elapse since the last proof of
+    /// life before post-death conditions can unlock, in addition to the
+    /// timestamp threshold. Guards against miners/validators nudging
+    /// `block.timestamp` within their permitted drift window to trigger an
+    /// early release without real block progression having occurred.
+    uint256 public constant MIN_POST_DEATH_BLOCK_DELTA = 256;
 
     error AtLeastOneGuardian();
     error InvalidApprovalThreshold();
@@ -264,7 +272,8 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         _vaultReleaseStates[vaultId] = VaultReleaseState({
             emergencyMode: false,
             inactivityPeriod: 30 days,
-            lastProofOfLife: block.timestamp
+            lastProofOfLife: block.timestamp,
+            lastProofOfLifeBlock: block.number
         });
 
         newVault.guardians.push(msg.sender);
@@ -427,6 +436,7 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         if (!vaults[vaultId].isActive) revert VaultNotActive();
 
         _vaultReleaseStates[vaultId].lastProofOfLife = block.timestamp;
+        _vaultReleaseStates[vaultId].lastProofOfLifeBlock = block.number;
         emit ProofOfLifeRecorded(vaultId, msg.sender, block.timestamp);
     }
 
@@ -649,6 +659,18 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         emit GuardianRemoved(vaultId, guardianToRemove);
     }
 
+    /**
+     * @dev Blocks elapsed since the last recorded proof of life for a vault.
+     */
+    function getBlocksSinceProofOfLife(uint256 vaultId) external view returns (uint256) {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        VaultReleaseState storage state = _vaultReleaseStates[vaultId];
+        if (block.number <= state.lastProofOfLifeBlock) {
+            return 0;
+        }
+        return block.number - state.lastProofOfLifeBlock;
+    }
+
     function _addDocument(
         uint256 vaultId,
         string memory encryptedMetadata,
@@ -818,16 +840,15 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     }
 
     /**
-     * @dev Burn NFT access token and invalidate all prior grants for owner+vault in O(1).
+     * @dev Burn NFT access token. Grant invalidation is handled centrally in
+     * _update, which bumps the vault access version whenever the burner's
+     * balance for the vault drops to zero.
      */
     function burnAccessToken(uint256 tokenId) external nonReentrant {
         address owner = ownerOf(tokenId);
         if (!_isTokenOwnerOrApproved(owner, msg.sender, tokenId)) {
             revert NotOwnerOrApproved();
         }
-
-        uint256 vaultId = tokenVaultMapping[tokenId];
-        _vaultAccessVersion[vaultId][owner] = _currentAccessVersion(vaultId, owner) + 1;
 
         _burn(tokenId);
 
@@ -992,6 +1013,14 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
             }
         }
 
+        // Evaluated after all balance mutations so self-transfers never
+        // transiently read a zero balance. When the sender's balance for this
+        // vault drops to zero, every prior document grant they hold is
+        // invalidated; re-acquiring a pass requires fresh guardian approval.
+        if (from != address(0) && vaultId != 0 && _ownedVaultTokenBalance[from][vaultId] == 0) {
+            _vaultAccessVersion[vaultId][from] += 1;
+        }
+
         return from;
     }
 
@@ -1033,7 +1062,11 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         if (state.inactivityPeriod == 0) {
             return false;
         }
-        return block.timestamp >= state.lastProofOfLife + state.inactivityPeriod;
+
+        bool timestampExpired = block.timestamp >= state.lastProofOfLife + state.inactivityPeriod;
+        bool blocksElapsed = block.number >= state.lastProofOfLifeBlock + MIN_POST_DEATH_BLOCK_DELTA;
+
+        return timestampExpired && blocksElapsed;
     }
 
     function _isReleaseConditionSatisfied(uint256 documentId) internal view returns (bool) {

@@ -46,6 +46,12 @@ import { keyInboxService } from "../services/keyInbox.service";
 import { keyStoreService } from "../services/keyStore.service";
 import { decryptWithPrivateKey } from "../utils/crypto";
 import { clientKeyringService } from "../services/clientKeyring.service";
+import {
+  collectStream,
+  decryptStream,
+  detectStreamingCiphertext,
+  importStreamingKey,
+} from "../services/streamingCrypto.service";
 // reconstructSecret is available for on-chain SSS share reconstruction when needed
 // import { reconstructSecret } from "../services/secrets.service";
 
@@ -66,6 +72,12 @@ const wordArrayToUint8Array = (wordArray: WordArray): Uint8Array => {
     u8[i] = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
   }
   return u8;
+};
+
+type SaveFilePickerWindow = Window & {
+  showSaveFilePicker?: (options?: {
+    suggestedName?: string;
+  }) => Promise<{ createWritable: () => Promise<WritableStream<Uint8Array> & { close: () => Promise<void> }> }>;
 };
 
 type AccessState =
@@ -571,27 +583,69 @@ const AccessCenter = () => {
 
     const response = await fetchFromIPFS(doc.ipfsHash);
 
-    const encryptedText = await response.text();
-    const decryptedWordArray = CryptoJS.AES.decrypt(encryptedText, key);
-    const bytes = wordArrayToUint8Array(decryptedWordArray);
-
+    const { isStreaming, stream } = await detectStreamingCiphertext(response.body);
     const metadata = decryptMetadata(doc);
     const name = metadata?.name || `document-${doc.id}`;
     const type = metadata?.type || "application/octet-stream";
 
-    return { bytes, name, type };
+    if (isStreaming) {
+      const cryptoKey = await importStreamingKey(key);
+      const decrypted = decryptStream(stream, cryptoKey);
+      return { mode: "streaming" as const, decrypted, name, type };
+    }
+
+    const encryptedBytes = await collectStream(stream);
+    const encryptedText = new TextDecoder().decode(encryptedBytes);
+    const decryptedWordArray = CryptoJS.AES.decrypt(encryptedText, key);
+    const bytes = wordArrayToUint8Array(decryptedWordArray);
+    return { mode: "legacy" as const, bytes, name, type };
   };
 
   const handleDownload = async (doc: DocumentData) => {
     try {
-      const { bytes, name, type } = await decryptFileFromIPFS(doc);
-      const arrayBuffer = new ArrayBuffer(bytes.byteLength);
-      new Uint8Array(arrayBuffer).set(bytes);
-      const blob = new Blob([arrayBuffer], { type });
+      const result = await decryptFileFromIPFS(doc);
+
+      if (result.mode === "streaming") {
+        const pickerWindow = window as SaveFilePickerWindow;
+        if (typeof pickerWindow.showSaveFilePicker === "function") {
+          const handle = await pickerWindow.showSaveFilePicker({
+            suggestedName: result.name,
+          });
+          const writable = await handle.createWritable();
+          try {
+            await result.decrypted.pipeTo(writable);
+          } catch (error) {
+            try {
+              await writable.close();
+            } catch {
+              // ignore close errors after failed pipe
+            }
+            throw error;
+          }
+          toast.success("Document saved");
+          return;
+        }
+
+        const bytes = await collectStream(result.decrypted);
+        const arrayBuffer = new ArrayBuffer(bytes.byteLength);
+        new Uint8Array(arrayBuffer).set(bytes);
+        const blob = new Blob([arrayBuffer], { type: result.type });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = result.name;
+        link.click();
+        URL.revokeObjectURL(url);
+        return;
+      }
+
+      const arrayBuffer = new ArrayBuffer(result.bytes.byteLength);
+      new Uint8Array(arrayBuffer).set(result.bytes);
+      const blob = new Blob([arrayBuffer], { type: result.type });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = name;
+      link.download = result.name;
       link.click();
       URL.revokeObjectURL(url);
     } catch (error: any) {
@@ -602,10 +656,14 @@ const AccessCenter = () => {
 
   const handleView = async (doc: DocumentData) => {
     try {
-      const { bytes, type } = await decryptFileFromIPFS(doc);
+      const result = await decryptFileFromIPFS(doc);
+      const bytes =
+        result.mode === "streaming"
+          ? await collectStream(result.decrypted)
+          : result.bytes;
       const arrayBuffer = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(arrayBuffer).set(bytes);
-      const blob = new Blob([arrayBuffer], { type });
+      const blob = new Blob([arrayBuffer], { type: result.type });
       const url = URL.createObjectURL(blob);
       window.open(url, "_blank");
       setTimeout(() => URL.revokeObjectURL(url), 1000);

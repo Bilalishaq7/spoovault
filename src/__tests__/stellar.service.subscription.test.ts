@@ -33,6 +33,10 @@ if (typeof globalThis.localStorage === "undefined") {
 
 const makeMockWindow = (): Record<string, unknown> => ({
   localStorage: (globalThis as any).localStorage,
+  location: { origin: "http://localhost" },
+  postMessage: (): void => {},
+  addEventListener: (): void => {},
+  removeEventListener: (): void => {},
   setInterval: (): number => 1,
   clearInterval: (): void => {},
 });
@@ -130,6 +134,9 @@ describe("Freighter wallet-change subscription", () => {
   });
 
   it("reads the current network name without throwing", async () => {
+    stellarService.setMockFreighter({
+      getNetwork: async () => "TESTNET",
+    });
     expect(typeof (await stellarService.getNetwork())).toBe("string");
   });
 });
