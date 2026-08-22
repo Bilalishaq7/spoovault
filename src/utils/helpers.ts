@@ -17,7 +17,9 @@ export const shortenAddress = (address: string, chars = 4): string => {
 export const generateEncryptionKey = (): string => {
   const array = new Uint8Array(32);
   window.crypto.getRandomValues(array);
-  return Array.from(array, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(array, (byte) => byte.toString(16).padStart(2, "0")).join(
+    ""
+  );
 };
 
 /**
@@ -54,7 +56,9 @@ export const formatFileSize = (bytes: number): string => {
   const k = 1024;
   const sizes = ["Bytes", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return Number.parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  return (
+    Number.parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i]
+  );
 };
 
 /**
@@ -80,7 +84,10 @@ export const isValidStellarAddress = (address: string): boolean => {
 /**
  * Validate Ethereum address
  */
-export const isValidAddress = (address: string, ecosystem?: "avalanche" | "stellar"): boolean => {
+export const isValidAddress = (
+  address: string,
+  ecosystem?: "avalanche" | "stellar"
+): boolean => {
   if (ecosystem === "stellar") {
     return isValidStellarAddress(address);
   }
@@ -111,18 +118,21 @@ export const fetchFromIPFS = (
 /**
  * Split encryption key among guardians (simplified)
  */
-export const splitKeyAmongGuardians = (key: string, guardians: string[]): string[] => {
+export const splitKeyAmongGuardians = (
+  key: string,
+  guardians: string[]
+): string[] => {
   // Note: In production, use Shamir's Secret Sharing
   const parts: string[] = [];
   const keyLength = key.length;
   const partSize = Math.ceil(keyLength / guardians.length);
-  
+
   for (let i = 0; i < guardians.length; i++) {
     const start = i * partSize;
     const end = Math.min(start + partSize, keyLength);
     parts.push(key.slice(start, end));
   }
-  
+
   return parts;
 };
 
@@ -151,14 +161,19 @@ export const getCurrentYear = (): number => {
  * Format composite global vault identifier (VaultGID)
  * e.g. "43113:1" or "stellar-testnet:1"
  */
-export const toVaultGID = (chainIdentifier: number | string, vaultId: number | string): string => {
+export const toVaultGID = (
+  chainIdentifier: number | string,
+  vaultId: number | string
+): string => {
   return `${chainIdentifier}:${vaultId}`;
 };
 
 /**
  * Parse a composite global vault identifier (VaultGID)
  */
-export const parseVaultGID = (gid: string): { chainId: string; vaultId: number } => {
+export const parseVaultGID = (
+  gid: string
+): { chainId: string; vaultId: number } => {
   const parts = gid.split(":");
   if (parts.length >= 2) {
     const chainId = parts[0];
@@ -231,8 +246,3 @@ export const keyRecordByVaultGID = <T>(
 export const isIPFSConfigured = (): boolean => {
   return ipfsService.isConfigured();
 };
-
-
-
-
-

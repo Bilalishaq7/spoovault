@@ -48,7 +48,10 @@ import { buttonClasses } from "../utils/buttonClasses";
 import { captureError } from "../services/telemetry.service";
 import { keyInboxService } from "../services/keyInbox.service";
 import { keyStoreService } from "../services/keyStore.service";
-import { splitSecretVSS, parseEncryptedMetadataPayload } from "../services/secrets.service";
+import {
+  splitSecretVSS,
+  parseEncryptedMetadataPayload,
+} from "../services/secrets.service";
 import { encryptWithPublicKey } from "../utils/crypto";
 import { VirtualizedDocumentsList } from "../components/documents/VirtualizedDocumentsList";
 
@@ -94,19 +97,36 @@ const Documents = () => {
     onClose: onShareModalClose,
   } = useDisclosure();
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<"all" | "accessible" | "encrypted">("all");
-  const { account, isConnected, connect, provider, signer, isFujiNetwork, ecosystem } = useWeb3();
+  const [filter, setFilter] = useState<"all" | "accessible" | "encrypted">(
+    "all"
+  );
+  const {
+    account,
+    isConnected,
+    connect,
+    provider,
+    signer,
+    isFujiNetwork,
+    ecosystem,
+  } = useWeb3();
 
   const [documents, setDocuments] = useState<DocumentData[]>([]);
   const [vaults, setVaults] = useState<VaultData[]>([]);
   const [uploadableVaults, setUploadableVaults] = useState<VaultData[]>([]);
-  const [activeAccessByDoc, setActiveAccessByDoc] = useState<Record<number, boolean>>({});
-  const [latestRequestByDoc, setLatestRequestByDoc] = useState<Record<number, AccessRequestData | null>>({});
-  const [releaseConditionByDoc, setReleaseConditionByDoc] = useState<Record<number, number>>({});
+  const [activeAccessByDoc, setActiveAccessByDoc] = useState<
+    Record<number, boolean>
+  >({});
+  const [latestRequestByDoc, setLatestRequestByDoc] = useState<
+    Record<number, AccessRequestData | null>
+  >({});
+  const [releaseConditionByDoc, setReleaseConditionByDoc] = useState<
+    Record<number, number>
+  >({});
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadStage, setUploadStage] = useState<UploadStage>("idle");
-  const [uploadAbortController, setUploadAbortController] = useState<AbortController | null>(null);
+  const [uploadAbortController, setUploadAbortController] =
+    useState<AbortController | null>(null);
   const [requestingDocId, setRequestingDocId] = useState<number | null>(null);
 
   const [selectedVaultId, setSelectedVaultId] = useState<number | null>(null);
@@ -122,7 +142,8 @@ const Documents = () => {
   const [shareRecipient, setShareRecipient] = useState("");
   const [sendingInboxKey, setSendingInboxKey] = useState(false);
   const keyImportInputRef = useRef<HTMLInputElement | null>(null);
-  const stepChipClass = "bg-brand-700/12 text-brand-300 border border-brand-700/35";
+  const stepChipClass =
+    "bg-brand-700/12 text-brand-300 border border-brand-700/35";
   const selectFieldWithIconClass =
     "h-11 w-full rounded-full border border-gray-700/80 bg-gray-900/75 pl-10 pr-10 text-sm text-gray-100 outline-none transition-colors hover:border-gray-600 focus:border-brand-700/70";
   const selectFieldClass =
@@ -139,7 +160,10 @@ const Documents = () => {
   }, [ecosystem]);
 
   useEffect(() => {
-    if (isConnected && ((provider && signer && isFujiNetwork) || ecosystem === "stellar")) {
+    if (
+      isConnected &&
+      ((provider && signer && isFujiNetwork) || ecosystem === "stellar")
+    ) {
       if (provider && signer) {
         contractService.initialize(provider, signer);
       }
@@ -175,17 +199,33 @@ const Documents = () => {
       const accountLower = account.toLowerCase();
       const visibleVaults = vaultsData;
       const guardianVaults = visibleVaults.filter((vault) =>
-        vault.guardians.some((guardian) => guardian.toLowerCase() === accountLower)
+        vault.guardians.some(
+          (guardian) => guardian.toLowerCase() === accountLower
+        )
       );
-      const guardianVaultIds = new Set<number>(guardianVaults.map((vault) => vault.id));
+      const guardianVaultIds = new Set<number>(
+        guardianVaults.map((vault) => vault.id)
+      );
 
-      const visibleVaultIds = new Set<number>(visibleVaults.map((vault) => vault.id));
-      const scopedDocs = docsData.filter((doc) => visibleVaultIds.has(doc.vaultId));
+      const visibleVaultIds = new Set<number>(
+        visibleVaults.map((vault) => vault.id)
+      );
+      const scopedDocs = docsData.filter((doc) =>
+        visibleVaultIds.has(doc.vaultId)
+      );
       const docIds = scopedDocs.map((doc) => doc.id);
 
-      const accessMap = await contractService.getActiveAccessMap(account, docIds);
-      const requestMap = await contractService.getLatestRequestsForUser(account, docIds);
-      const releaseMap = await contractService.getDocumentReleaseConditionMap(docIds);
+      const accessMap = await contractService.getActiveAccessMap(
+        account,
+        docIds
+      );
+      const requestMap = await contractService.getLatestRequestsForUser(
+        account,
+        docIds
+      );
+      const releaseMap = await contractService.getDocumentReleaseConditionMap(
+        docIds
+      );
 
       setVaults(visibleVaults);
       setUploadableVaults(guardianVaults);
@@ -199,7 +239,8 @@ const Documents = () => {
     } catch (error) {
       console.error("Error loading documents:", error);
       captureError("documents.loadData", error, { account: account || "" });
-      const message = error instanceof Error ? error.message : "Failed to load documents";
+      const message =
+        error instanceof Error ? error.message : "Failed to load documents";
       toast.error(message);
       setUploadableVaults([]);
       setActiveAccessByDoc({});
@@ -222,11 +263,15 @@ const Documents = () => {
     return keyStoreService.get(docId);
   };
 
-  const decryptMetadata = (doc: DocumentData): { name?: string; size?: number; type?: string } | null => {
+  const decryptMetadata = (
+    doc: DocumentData
+  ): { name?: string; size?: number; type?: string } | null => {
     const key = getStoredKey(doc.id);
     if (!key) return null;
     try {
-      const { ciphertext } = parseEncryptedMetadataPayload(doc.encryptedMetadata);
+      const { ciphertext } = parseEncryptedMetadataPayload(
+        doc.encryptedMetadata
+      );
       const raw = decryptData(ciphertext, key);
       return JSON.parse(raw);
     } catch {
@@ -281,17 +326,27 @@ const Documents = () => {
       }
       if (beneficiary) {
         if (!isValidAddress(beneficiary)) {
-          throw new Error("Invalid key package: beneficiary wallet address is invalid");
+          throw new Error(
+            "Invalid key package: beneficiary wallet address is invalid"
+          );
         }
         if (!account) {
-          throw new Error("Connect the beneficiary wallet before importing this key package");
+          throw new Error(
+            "Connect the beneficiary wallet before importing this key package"
+          );
         }
         if (beneficiary.toLowerCase() !== account.toLowerCase()) {
           throw new Error("This key package is issued for a different wallet");
         }
       }
-      if (fileContract && expectedContract && fileContract !== expectedContract) {
-        throw new Error("This key package is for a different SpooVault contract");
+      if (
+        fileContract &&
+        expectedContract &&
+        fileContract !== expectedContract
+      ) {
+        throw new Error(
+          "This key package is for a different SpooVault contract"
+        );
       }
       if (
         Number.isFinite(fileChainId) &&
@@ -300,7 +355,9 @@ const Documents = () => {
         expectedChainId > 0 &&
         fileChainId !== expectedChainId
       ) {
-        throw new Error("This key package is for a different blockchain network");
+        throw new Error(
+          "This key package is for a different blockchain network"
+        );
       }
 
       keyStoreService.set(documentId, key);
@@ -366,9 +423,13 @@ const Documents = () => {
     }
 
     try {
-      const beneficiaryPubKey = await contractService.getUserPublicKey(recipient);
+      const beneficiaryPubKey = await contractService.getUserPublicKey(
+        recipient
+      );
       if (!beneficiaryPubKey) {
-        toast.error("The beneficiary has not registered their encryption public key. Ask them to register it in their Profile page first.");
+        toast.error(
+          "The beneficiary has not registered their encryption public key. Ask them to register it in their Profile page first."
+        );
         return;
       }
 
@@ -402,7 +463,9 @@ const Documents = () => {
         try {
           const flagKey = `spoovault-beneficiary-package-exported-${account.toLowerCase()}`;
           localStorage.setItem(flagKey, "1");
-          window.dispatchEvent(new Event("spoovault-beneficiary-package-exported"));
+          window.dispatchEvent(
+            new Event("spoovault-beneficiary-package-exported")
+          );
         } catch {
           // ignore localStorage errors
         }
@@ -451,9 +514,13 @@ const Documents = () => {
 
     setSendingInboxKey(true);
     try {
-      const beneficiaryPubKey = await contractService.getUserPublicKey(recipient);
+      const beneficiaryPubKey = await contractService.getUserPublicKey(
+        recipient
+      );
       if (!beneficiaryPubKey) {
-        toast.error("The beneficiary has not registered their encryption public key. Ask them to register it in their Profile page first.");
+        toast.error(
+          "The beneficiary has not registered their encryption public key. Ask them to register it in their Profile page first."
+        );
         return;
       }
 
@@ -476,7 +543,9 @@ const Documents = () => {
       try {
         const flagKey = `spoovault-beneficiary-package-exported-${account.toLowerCase()}`;
         localStorage.setItem(flagKey, "1");
-        window.dispatchEvent(new Event("spoovault-beneficiary-package-exported"));
+        window.dispatchEvent(
+          new Event("spoovault-beneficiary-package-exported")
+        );
       } catch {
         // ignore localStorage errors
       }
@@ -519,7 +588,13 @@ const Documents = () => {
         releaseCondition: releaseConditionByDoc[doc.id] ?? 0,
       };
     });
-  }, [documents, vaultNameById, activeAccessByDoc, latestRequestByDoc, releaseConditionByDoc]);
+  }, [
+    documents,
+    vaultNameById,
+    activeAccessByDoc,
+    latestRequestByDoc,
+    releaseConditionByDoc,
+  ]);
 
   const filteredDocuments = documentsWithMetadata
     .filter((item) => {
@@ -541,7 +616,10 @@ const Documents = () => {
     if (!shareTargetDocId) {
       return null;
     }
-    return documentsWithMetadata.find((item) => item.doc.id === shareTargetDocId) || null;
+    return (
+      documentsWithMetadata.find((item) => item.doc.id === shareTargetDocId) ||
+      null
+    );
   }, [documentsWithMetadata, shareTargetDocId]);
 
   const accessLabel = (level: number) => {
@@ -561,13 +639,15 @@ const Documents = () => {
     if (stage === "encrypting") return "Encrypting file locally";
     if (stage === "uploading_ipfs") return "Uploading encrypted file to IPFS";
     if (stage === "submitting_tx") return "Submitting blockchain transaction";
-    if (stage === "confirming_tx") return "Waiting for transaction confirmation";
+    if (stage === "confirming_tx")
+      return "Waiting for transaction confirmation";
     if (stage === "finalizing") return "Finalizing and refreshing data";
     return "Idle";
   };
 
   const isUploadAbortable =
-    uploading && (uploadStage === "encrypting" || uploadStage === "uploading_ipfs");
+    uploading &&
+    (uploadStage === "encrypting" || uploadStage === "uploading_ipfs");
 
   const handleAbortUpload = () => {
     if (!isUploadAbortable || !uploadAbortController) {
@@ -601,7 +681,9 @@ const Documents = () => {
     }
     const vault = uploadableVaults.find((v) => v.id === selectedVaultId);
     if (!vault) {
-      toast.error("You can only upload into vaults where your wallet is an active guardian.");
+      toast.error(
+        "You can only upload into vaults where your wallet is an active guardian."
+      );
       return;
     }
 
@@ -615,7 +697,7 @@ const Documents = () => {
     setUploadAbortController(abortController);
     try {
       setUploadStage("encrypting");
-      
+
       // Fetch public keys for all guardians of this vault
       const missingKeys: string[] = [];
       const guardianPubKeys: Record<string, string> = {};
@@ -629,8 +711,12 @@ const Documents = () => {
       }
 
       if (missingKeys.length > 0) {
-        const short = missingKeys.map(addr => shortenAddress(addr, 4)).join(", ");
-        throw new Error(`Cannot upload. Guardians missing encryption public keys: ${short}. They must register their keys in their Profile page first.`);
+        const short = missingKeys
+          .map((addr) => shortenAddress(addr, 4))
+          .join(", ");
+        throw new Error(
+          `Cannot upload. Guardians missing encryption public keys: ${short}. They must register their keys in their Profile page first.`
+        );
       }
 
       const key = generateEncryptionKey();
@@ -640,7 +726,7 @@ const Documents = () => {
         type: selectedFile.type,
         lastModified: selectedFile.lastModified,
       };
-      
+
       // Split symmetric key using Feldmann Verifiable Secret Sharing (VSS)
       const { shares: keyShares, commitments } = splitSecretVSS(
         key,
@@ -655,7 +741,7 @@ const Documents = () => {
       });
 
       const encryptedFile = await encryptFile(selectedFile, key);
-      
+
       // Encrypt each share for each guardian using their public key
       const encryptedShares: string[] = [];
       for (let i = 0; i < vault.guardians.length; i++) {
@@ -804,7 +890,9 @@ const Documents = () => {
       }
       await loadData();
     } catch (error: any) {
-      captureError("documents.handleRequestAccess", error, { documentId: docId });
+      captureError("documents.handleRequestAccess", error, {
+        documentId: docId,
+      });
       toast.error(error.message || "Failed to request access");
     } finally {
       setRequestingDocId(null);
@@ -820,7 +908,9 @@ const Documents = () => {
     }
   };
 
-  const accessibleCount = documentsWithMetadata.filter((item) => item.hasChainAccess).length;
+  const accessibleCount = documentsWithMetadata.filter(
+    (item) => item.hasChainAccess
+  ).length;
 
   if (!isConnected) {
     return (
@@ -831,7 +921,8 @@ const Documents = () => {
           </div>
           <h1 className="text-3xl font-bold mb-4">Connect Your Wallet</h1>
           <p className="text-gray-400 mb-8 max-w-2xl mx-auto">
-            Connect your wallet to upload and manage encrypted family documents on Avalanche.
+            Connect your wallet to upload and manage encrypted family documents
+            on Avalanche.
           </p>
           <Button
             size="lg"
@@ -860,10 +951,13 @@ const Documents = () => {
           <Button
             size="lg"
             className={buttonClasses.warningLg}
-            onPress={() => window.ethereum && window.ethereum.request({
-              method: "wallet_switchEthereumChain",
-              params: [{ chainId: "0xA869" }]
-            })}
+            onPress={() =>
+              window.ethereum &&
+              window.ethereum.request({
+                method: "wallet_switchEthereumChain",
+                params: [{ chainId: "0xA869" }],
+              })
+            }
           >
             Switch to Fuji Network
           </Button>
@@ -878,7 +972,8 @@ const Documents = () => {
         <div>
           <h1 className="text-3xl font-bold mb-2">Secure Documents</h1>
           <p className="text-gray-400">
-            Manage encrypted files for daily sharing, emergency access, and inheritance plans
+            Manage encrypted files for daily sharing, emergency access, and
+            inheritance plans
           </p>
         </div>
         <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
@@ -1011,7 +1106,10 @@ const Documents = () => {
             </div>
             <div>
               <h2 className="text-xl font-bold">Upload Document</h2>
-              <p className="text-sm text-gray-400">Encrypt locally, then pin to IPFS for controlled access and future release</p>
+              <p className="text-sm text-gray-400">
+                Encrypt locally, then pin to IPFS for controlled access and
+                future release
+              </p>
             </div>
           </ModalHeader>
           <ModalBody className="modal-scroll max-h-[70vh] overflow-y-auto px-4 sm:px-6 py-4">
@@ -1020,17 +1118,23 @@ const Documents = () => {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="font-semibold">Document</p>
-                    <p className="text-xs text-gray-400">Select the document to encrypt</p>
+                    <p className="text-xs text-gray-400">
+                      Select the document to encrypt
+                    </p>
                   </div>
                   <Chip size="sm" variant="flat" className={stepChipClass}>
                     Step 1
                   </Chip>
                 </div>
                 <div className="space-y-1">
-                  <p className="text-xs text-gray-300 font-medium">Select File</p>
+                  <p className="text-xs text-gray-300 font-medium">
+                    Select File
+                  </p>
                   <input
                     type="file"
-                    onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                    onChange={(event) =>
+                      setSelectedFile(event.target.files?.[0] ?? null)
+                    }
                     className="block w-full rounded-xl border border-gray-700/80 bg-gray-900/75 px-3 py-2 text-sm text-gray-100 file:mr-3 file:rounded-lg file:border-0 file:bg-gray-200 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-gray-900 hover:file:bg-gray-100"
                   />
                 </div>
@@ -1046,7 +1150,9 @@ const Documents = () => {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="font-semibold">Access Vault</p>
-                    <p className="text-xs text-gray-400">Choose where to store this file</p>
+                    <p className="text-xs text-gray-400">
+                      Choose where to store this file
+                    </p>
                   </div>
                   <Chip size="sm" variant="flat" className={stepChipClass}>
                     Step 2
@@ -1055,7 +1161,11 @@ const Documents = () => {
                 <div className="relative">
                   <select
                     value={selectedVaultId ? String(selectedVaultId) : ""}
-                    onChange={(event) => setSelectedVaultId(event.target.value ? Number(event.target.value) : null)}
+                    onChange={(event) =>
+                      setSelectedVaultId(
+                        event.target.value ? Number(event.target.value) : null
+                      )
+                    }
                     className={selectFieldClass}
                   >
                     <option value="" disabled>
@@ -1071,7 +1181,8 @@ const Documents = () => {
                 </div>
                 {uploadableVaults.length === 0 && (
                   <p className="text-sm text-yellow-400">
-                    No guardian vaults available. Accept guardian invite or create a vault first.
+                    No guardian vaults available. Accept guardian invite or
+                    create a vault first.
                   </p>
                 )}
               </div>
@@ -1080,7 +1191,9 @@ const Documents = () => {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="font-semibold">Access Level</p>
-                    <p className="text-xs text-gray-400">Required access for this document</p>
+                    <p className="text-xs text-gray-400">
+                      Required access for this document
+                    </p>
                   </div>
                   <Chip size="sm" variant="flat" className={stepChipClass}>
                     Step 3
@@ -1088,32 +1201,48 @@ const Documents = () => {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <Button
-                    className={accessLevel === 0 ? buttonClasses.primarySm : buttonClasses.ghostSm}
+                    className={
+                      accessLevel === 0
+                        ? buttonClasses.primarySm
+                        : buttonClasses.ghostSm
+                    }
                     onPress={() => setAccessLevel(0)}
                   >
                     read
                   </Button>
                   <Button
-                    className={accessLevel === 1 ? buttonClasses.primarySm : buttonClasses.ghostSm}
+                    className={
+                      accessLevel === 1
+                        ? buttonClasses.primarySm
+                        : buttonClasses.ghostSm
+                    }
                     onPress={() => setAccessLevel(1)}
                   >
                     read_write
                   </Button>
                   <Button
-                    className={accessLevel === 2 ? buttonClasses.primarySm : buttonClasses.ghostSm}
+                    className={
+                      accessLevel === 2
+                        ? buttonClasses.primarySm
+                        : buttonClasses.ghostSm
+                    }
                     onPress={() => setAccessLevel(2)}
                   >
                     admin
                   </Button>
                 </div>
-                <p className="text-xs text-gray-500">Selected: {accessLabel(accessLevel)}</p>
+                <p className="text-xs text-gray-500">
+                  Selected: {accessLabel(accessLevel)}
+                </p>
               </div>
 
               <div className="rounded-2xl border border-gray-800/85 bg-gray-900/78 p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="font-semibold">Release Condition</p>
-                    <p className="text-xs text-gray-400">Define when this document can be requested</p>
+                    <p className="text-xs text-gray-400">
+                      Define when this document can be requested
+                    </p>
                   </div>
                   <Chip size="sm" variant="flat" className={stepChipClass}>
                     Step 4
@@ -1121,25 +1250,41 @@ const Documents = () => {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <Button
-                    className={releaseCondition === 0 ? buttonClasses.primarySm : buttonClasses.ghostSm}
+                    className={
+                      releaseCondition === 0
+                        ? buttonClasses.primarySm
+                        : buttonClasses.ghostSm
+                    }
                     onPress={() => setReleaseCondition(0)}
                   >
                     anytime
                   </Button>
                   <Button
-                    className={releaseCondition === 1 ? buttonClasses.primarySm : buttonClasses.ghostSm}
+                    className={
+                      releaseCondition === 1
+                        ? buttonClasses.primarySm
+                        : buttonClasses.ghostSm
+                    }
                     onPress={() => setReleaseCondition(1)}
                   >
                     live_only
                   </Button>
                   <Button
-                    className={releaseCondition === 2 ? buttonClasses.primarySm : buttonClasses.ghostSm}
+                    className={
+                      releaseCondition === 2
+                        ? buttonClasses.primarySm
+                        : buttonClasses.ghostSm
+                    }
                     onPress={() => setReleaseCondition(2)}
                   >
                     emergency_only
                   </Button>
                   <Button
-                    className={releaseCondition === 3 ? buttonClasses.primarySm : buttonClasses.ghostSm}
+                    className={
+                      releaseCondition === 3
+                        ? buttonClasses.primarySm
+                        : buttonClasses.ghostSm
+                    }
                     onPress={() => setReleaseCondition(3)}
                   >
                     post_death_only
@@ -1152,11 +1297,13 @@ const Documents = () => {
 
               <div className="p-4 bg-brand-700/10 border border-brand-700/20 rounded-2xl">
                 <p className="text-sm">
-                  <span className="font-medium">Note:</span> Files are encrypted client-side before
-                  upload. Save the encryption key shown after upload.
+                  <span className="font-medium">Note:</span> Files are encrypted
+                  client-side before upload. Save the encryption key shown after
+                  upload.
                 </p>
                 <p className="text-xs text-gray-400 mt-2">
-                  Security mode: document keys are cached for the current browser session only.
+                  Security mode: document keys are cached for the current
+                  browser session only.
                 </p>
               </div>
               {uploading && (
@@ -1170,13 +1317,19 @@ const Documents = () => {
                       <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse [animation-delay:320ms]" />
                     </span>
                   </div>
-                  <p className="text-sm text-gray-300" aria-live="polite">{uploadStageLabel(uploadStage)}</p>
+                  <p className="text-sm text-gray-300" aria-live="polite">
+                    {uploadStageLabel(uploadStage)}
+                  </p>
                 </div>
               )}
             </div>
           </ModalBody>
           <ModalFooter className="border-t border-gray-800/80 px-4 sm:px-6 py-3 flex-col-reverse sm:flex-row gap-2">
-            <Button className={`${buttonClasses.ghostMd} w-full sm:w-auto`} onPress={onClose} isDisabled={uploading}>
+            <Button
+              className={`${buttonClasses.ghostMd} w-full sm:w-auto`}
+              onPress={onClose}
+              isDisabled={uploading}
+            >
               Cancel
             </Button>
             <Button
@@ -1190,7 +1343,12 @@ const Documents = () => {
               className={`${buttonClasses.primaryMd} w-full sm:w-auto`}
               onPress={handleUpload}
               isLoading={uploading}
-              isDisabled={uploadableVaults.length === 0 || !selectedFile || !selectedVaultId || uploading}
+              isDisabled={
+                uploadableVaults.length === 0 ||
+                !selectedFile ||
+                !selectedVaultId ||
+                uploading
+              }
             >
               {uploading ? uploadStageLabel(uploadStage) : "Upload Document"}
             </Button>
@@ -1210,7 +1368,8 @@ const Documents = () => {
           <ModalHeader>Encryption Key Backup</ModalHeader>
           <ModalBody className="max-h-[70vh] overflow-y-auto">
             <p className="text-gray-400 text-sm">
-              Save this key securely. Owners, guardians, or approved beneficiaries may need it to decrypt Document #{lastDocumentId}.
+              Save this key securely. Owners, guardians, or approved
+              beneficiaries may need it to decrypt Document #{lastDocumentId}.
             </p>
             <div className="p-3 bg-gray-800/60 rounded-lg font-mono text-sm break-all">
               {lastKey}
@@ -1218,7 +1377,9 @@ const Documents = () => {
             <div className="rounded-xl border border-gray-700/70 bg-gray-900/65 p-3 space-y-2">
               <p className="text-sm font-medium">Recommended backup steps</p>
               <p className="text-xs text-gray-400">1. Download backup file</p>
-              <p className="text-xs text-gray-400">2. Store in secure cloud/USB/password manager</p>
+              <p className="text-xs text-gray-400">
+                2. Store in secure cloud/USB/password manager
+              </p>
               <p className="text-xs text-gray-400">3. Keep at least 2 copies</p>
             </div>
             <label className="flex items-start gap-2 text-sm text-gray-300">
@@ -1226,7 +1387,9 @@ const Documents = () => {
                 type="checkbox"
                 className="mt-0.5 h-4 w-4 accent-red-600"
                 checked={keyBackupConfirmed}
-                onChange={(event) => setKeyBackupConfirmed(event.target.checked)}
+                onChange={(event) =>
+                  setKeyBackupConfirmed(event.target.checked)
+                }
               />
               <span>I have copied or downloaded this key backup.</span>
             </label>
@@ -1287,13 +1450,15 @@ const Documents = () => {
           <ModalHeader>Share Beneficiary Key Package</ModalHeader>
           <ModalBody className="max-h-[70vh] overflow-y-auto space-y-3">
             <p className="text-gray-400 text-sm">
-              Download a wallet-bound key package for the beneficiary. They must request access on-chain and import this package to decrypt.
+              Download a wallet-bound key package for the beneficiary. They must
+              request access on-chain and import this package to decrypt.
             </p>
             {selectedShareDocument && (
               <div className="rounded-xl border border-gray-700/70 bg-gray-900/65 p-3 text-sm">
                 <p className="font-medium">{selectedShareDocument.name}</p>
                 <p className="text-gray-400 text-xs mt-1">
-                  Vault: {selectedShareDocument.vaultName} • Document #{selectedShareDocument.doc.id}
+                  Vault: {selectedShareDocument.vaultName} • Document #
+                  {selectedShareDocument.doc.id}
                 </p>
               </div>
             )}
@@ -1310,20 +1475,34 @@ const Documents = () => {
               }}
             />
             <div className="rounded-xl border border-gray-700/70 bg-gray-900/65 p-3 space-y-1">
-              <p className="text-sm font-medium">How beneficiary uses this package</p>
-              <p className="text-xs text-gray-400">1. Receive an NFT pass for the vault.</p>
-              <p className="text-xs text-gray-400">2. Request document access and wait for guardian approvals.</p>
-              <p className="text-xs text-gray-400">3. Open My Access and click "Fetch Inbox Keys" (or import package file).</p>
+              <p className="text-sm font-medium">
+                How beneficiary uses this package
+              </p>
+              <p className="text-xs text-gray-400">
+                1. Receive an NFT pass for the vault.
+              </p>
+              <p className="text-xs text-gray-400">
+                2. Request document access and wait for guardian approvals.
+              </p>
+              <p className="text-xs text-gray-400">
+                3. Open My Access and click "Fetch Inbox Keys" (or import
+                package file).
+              </p>
             </div>
           </ModalBody>
           <ModalFooter className="flex-col-reverse sm:flex-row gap-2">
-            <Button className={`${buttonClasses.ghostMd} w-full sm:w-auto`} onPress={resetShareModal}>
+            <Button
+              className={`${buttonClasses.ghostMd} w-full sm:w-auto`}
+              onPress={resetShareModal}
+            >
               Cancel
             </Button>
             <Button
               className={`${buttonClasses.outlineMd} w-full sm:w-auto`}
               onPress={sendBeneficiaryKeyToInbox}
-              isDisabled={!shareTargetDocId || !shareRecipient.trim() || sendingInboxKey}
+              isDisabled={
+                !shareTargetDocId || !shareRecipient.trim() || sendingInboxKey
+              }
               isLoading={sendingInboxKey}
             >
               Send to In-App Inbox
@@ -1343,4 +1522,3 @@ const Documents = () => {
 };
 
 export default Documents;
-

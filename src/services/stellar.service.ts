@@ -12,7 +12,9 @@ export interface StellarWalletChangeEvent {
   network?: string;
 }
 
-export type StellarWalletChangeListener = (event: StellarWalletChangeEvent) => void;
+export type StellarWalletChangeListener = (
+  event: StellarWalletChangeEvent
+) => void;
 
 export type StellarUnsubscribe = () => void;
 
@@ -39,7 +41,10 @@ export type FreighterShim = {
   isConnected: () => Promise<boolean>;
   getAddress: () => Promise<string>;
   signTransaction?: (xdr: string, opts?: any) => Promise<string>;
-  signAuthEntry?: (preimageXdr: string, opts?: any) => Promise<{ signedAuthEntry: string; error?: string }>;
+  signAuthEntry?: (
+    preimageXdr: string,
+    opts?: any
+  ) => Promise<{ signedAuthEntry: string; error?: string }>;
   getNetwork?: () => Promise<unknown>;
   listen?: (callback: (event: StellarWalletChangeEvent) => void) => unknown;
 };
@@ -59,12 +64,14 @@ const loadFreighter = async (): Promise<FreighterShim> => {
   if (_freighter) return _freighter;
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mod = await import("@stellar/freighter-api") as any;
+    const mod = (await import("@stellar/freighter-api")) as any;
     _freighter = {
       isConnected: async () => {
         try {
           const result = await mod.isConnected();
-          return typeof result === "boolean" ? result : Boolean(result?.isConnected);
+          return typeof result === "boolean"
+            ? result
+            : Boolean(result?.isConnected);
         } catch {
           return false;
         }
@@ -80,7 +87,8 @@ const loadFreighter = async (): Promise<FreighterShim> => {
           if (typeof mod.getUserInfo === "function") {
             const info = await mod.getUserInfo();
             return normalizeAddressValue(
-              info && typeof (info as { publicKey?: unknown }).publicKey === "string"
+              info &&
+                typeof (info as { publicKey?: unknown }).publicKey === "string"
                 ? (info as { publicKey: string }).publicKey
                 : ""
             );
@@ -92,11 +100,11 @@ const loadFreighter = async (): Promise<FreighterShim> => {
       },
       signTransaction: mod.signTransaction,
       signAuthEntry: mod.signAuthEntry,
-      getNetwork: typeof mod?.getNetwork === "function" ? mod.getNetwork : undefined,
+      getNetwork:
+        typeof mod?.getNetwork === "function" ? mod.getNetwork : undefined,
       listen: typeof mod?.listen === "function" ? mod.listen : undefined,
     };
   } catch {
-
     // Package not installed – graceful fallback stubs
     _freighter = {
       isConnected: async () => false,
@@ -168,21 +176,25 @@ export const getRpcUrl = (): string => {
 };
 
 export const getContractId = (): string => {
-  const cid = import.meta.env.VITE_STELLAR_CONTRACT_ADDRESS as string | undefined;
+  const cid = import.meta.env.VITE_STELLAR_CONTRACT_ADDRESS as
+    | string
+    | undefined;
   return cid || contractId || "";
 };
-
-
 
 const isConfigured = (): boolean => {
   return !!getContractId();
 };
 
-const initialize = async (customContractId?: string): Promise<string | null> => {
+const initialize = async (
+  customContractId?: string
+): Promise<string | null> => {
   if (customContractId) {
     contractId = customContractId;
   } else {
-    contractId = (import.meta.env.VITE_STELLAR_CONTRACT_ADDRESS as string | undefined) || "";
+    contractId =
+      (import.meta.env.VITE_STELLAR_CONTRACT_ADDRESS as string | undefined) ||
+      "";
   }
 
   try {
@@ -264,7 +276,9 @@ const getNetwork = async (): Promise<string> => {
   return network || activeNetwork;
 };
 
-const getInjectedListen = (): ((callback: (event: StellarWalletChangeEvent) => void) => unknown) | null => {
+const getInjectedListen = ():
+  | ((callback: (event: StellarWalletChangeEvent) => void) => unknown)
+  | null => {
   if (typeof window === "undefined") return null;
   const injected = window.freighterApi || window.freighter;
   if (injected && typeof injected.listen === "function") {
@@ -273,7 +287,9 @@ const getInjectedListen = (): ((callback: (event: StellarWalletChangeEvent) => v
   return null;
 };
 
-const loadListen = async (): Promise<((callback: (event: StellarWalletChangeEvent) => void) => unknown) | null> => {
+const loadListen = async (): Promise<
+  ((callback: (event: StellarWalletChangeEvent) => void) => unknown) | null
+> => {
   const freighter = await loadFreighter();
   if (typeof freighter.listen === "function") {
     return freighter.listen;
@@ -281,8 +297,13 @@ const loadListen = async (): Promise<((callback: (event: StellarWalletChangeEven
   return getInjectedListen();
 };
 
-const startPollingWatcher = (listener: StellarWalletChangeListener): (() => void) => {
-  if (typeof window === "undefined" || typeof window.setInterval !== "function") {
+const startPollingWatcher = (
+  listener: StellarWalletChangeListener
+): (() => void) => {
+  if (
+    typeof window === "undefined" ||
+    typeof window.setInterval !== "function"
+  ) {
     return () => {};
   }
 
@@ -374,7 +395,7 @@ export const subscribeToWalletChanges = (
   };
 };
 
-const getMockStorage = <T,>(key: string, defaults: T): T => {
+const getMockStorage = <T>(key: string, defaults: T): T => {
   try {
     if (typeof localStorage !== "undefined" && localStorage !== null) {
       const raw = localStorage.getItem(`spoovault-stellar-mock-${key}`);
@@ -387,7 +408,7 @@ const getMockStorage = <T,>(key: string, defaults: T): T => {
   return raw ? (JSON.parse(raw) as T) : defaults;
 };
 
-const saveMockStorage = <T,>(key: string, data: T) => {
+const saveMockStorage = <T>(key: string, data: T) => {
   const jsonStr = JSON.stringify(data);
   try {
     if (typeof localStorage !== "undefined" && localStorage !== null) {
@@ -449,23 +470,24 @@ const executeSorobanQuery = async (
   const sdk = await loadStellarSdk();
   const server = new sdk.rpc.Server(sorobanRpcUrl);
   const contractAddress = getContractId();
-  
-  const sourceAddress = activeAccount || "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+  const sourceAddress =
+    activeAccount || "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
   const sourceAccount = new sdk.Account(sourceAddress, "0");
-  
-  const scArgs = args.map(arg => {
+
+  const scArgs = args.map((arg) => {
     if (typeof arg === "string" && arg.startsWith("G") && arg.length === 56) {
       return sdk.nativeToScVal(new sdk.Address(arg));
     }
     return sdk.nativeToScVal(arg);
   });
-  
+
   const op = sdk.Operation.invokeContractFunction({
     contract: new sdk.Address(contractAddress),
     function: functionName,
     args: scArgs,
   });
-  
+
   const tx = new sdk.TransactionBuilder(sourceAccount, {
     fee: "100",
     networkPassphrase: sdk.Networks.TESTNET,
@@ -473,12 +495,12 @@ const executeSorobanQuery = async (
     .addOperation(op)
     .setTimeout(30)
     .build();
-    
+
   const simulation = await server.simulateTransaction(tx);
   if (sdk.rpc.Api.isSimulationError(simulation)) {
     throw new Error(`Simulation failed: ${simulation.error}`);
   }
-  
+
   if (simulation.results && simulation.results.length > 0) {
     const result = simulation.results[0];
     if (result.retval) {
@@ -493,37 +515,43 @@ const executeSorobanCall = async (
   args: any[]
 ): Promise<any> => {
   if (!activeAccount) throw new Error("Wallet not connected");
-  
+
   const sdk = await loadStellarSdk();
   const server = new sdk.rpc.Server(sorobanRpcUrl);
   const contractAddress = getContractId();
-  
+
   // 1. Fetch source account
   const sourceAccount = await server.getAccount(activeAccount);
-  
+
   // 2. Convert arguments
-  const scArgs = args.map(arg => {
+  const scArgs = args.map((arg) => {
     if (typeof arg === "string" && arg.startsWith("G") && arg.length === 56) {
       return sdk.nativeToScVal(new sdk.Address(arg));
     }
     if (Array.isArray(arg)) {
-      return sdk.nativeToScVal(arg.map(item => {
-        if (typeof item === "string" && item.startsWith("G") && item.length === 56) {
-          return new sdk.Address(item);
-        }
-        return item;
-      }));
+      return sdk.nativeToScVal(
+        arg.map((item) => {
+          if (
+            typeof item === "string" &&
+            item.startsWith("G") &&
+            item.length === 56
+          ) {
+            return new sdk.Address(item);
+          }
+          return item;
+        })
+      );
     }
     return sdk.nativeToScVal(arg);
   });
-  
+
   // 3. Build Operation & Base transaction
   const op = sdk.Operation.invokeContractFunction({
     contract: new sdk.Address(contractAddress),
     function: functionName,
     args: scArgs,
   });
-  
+
   const tx = new sdk.TransactionBuilder(sourceAccount, {
     fee: "100",
     networkPassphrase: sdk.Networks.TESTNET,
@@ -531,13 +559,13 @@ const executeSorobanCall = async (
     .addOperation(op)
     .setTimeout(60)
     .build();
-    
+
   // 4. Simulate transaction
   const simulation = await server.simulateTransaction(tx);
   if (sdk.rpc.Api.isSimulationError(simulation)) {
     throw new Error(`Simulation failed: ${simulation.error}`);
   }
-  
+
   // 5. Sign auth entries (simulation entries) before Freighter submission
   if (simulation.results && simulation.results.length > 0) {
     const result = simulation.results[0];
@@ -552,59 +580,77 @@ const executeSorobanCall = async (
 
         const signResponse = await freighter.signAuthEntry(preimageXdr);
         if (signResponse.error) {
-          throw new Error(`Freighter auth entry signing failed: ${signResponse.error}`);
+          throw new Error(
+            `Freighter auth entry signing failed: ${signResponse.error}`
+          );
         }
-        
+
         if (signResponse.signedAuthEntry) {
           const signedEntryXdr = signResponse.signedAuthEntry;
-          const parsedEntry = sdk.xdr.SorobanAuthorizationEntry.fromXDR(signedEntryXdr, "base64");
+          const parsedEntry = sdk.xdr.SorobanAuthorizationEntry.fromXDR(
+            signedEntryXdr,
+            "base64"
+          );
           result.auth[i] = parsedEntry;
         }
       }
     }
   }
-  
+
   // 6. Assemble the transaction with simulated data
   const preparedTx = sdk.rpc.assembleTransaction(tx, simulation).build();
-  
+
   // 7. Request Freighter user signature for transaction envelope
   const freighter = await loadFreighter();
   if (typeof freighter.signTransaction !== "function") {
     throw new Error("Freighter wallet does not support signTransaction");
   }
   const signedXdr = await freighter.signTransaction(preparedTx.toXDR(), {
-    network: "TESTNET"
+    network: "TESTNET",
   });
 
-  
   if (!signedXdr) {
     throw new Error("Transaction signing rejected or failed");
   }
-  
+
   // 8. Submit the transaction
-  const signedTx = sdk.TransactionBuilder.fromXDR(signedXdr, sdk.Networks.TESTNET);
+  const signedTx = sdk.TransactionBuilder.fromXDR(
+    signedXdr,
+    sdk.Networks.TESTNET
+  );
   const response = await server.sendTransaction(signedTx);
   if (response.status === "ERROR") {
-    throw new Error(`Transaction submission failed: ${JSON.stringify(response.errorResult)}`);
+    throw new Error(
+      `Transaction submission failed: ${JSON.stringify(response.errorResult)}`
+    );
   }
-  
+
   // 9. Poll for status
   let pollAttempts = 0;
   while (pollAttempts < 30) {
     const txStatus = await server.getTransaction(response.hash);
     if (txStatus.status === "SUCCESS") {
-      if (simulation.results && simulation.results.length > 0 && simulation.results[0].retval) {
+      if (
+        simulation.results &&
+        simulation.results.length > 0 &&
+        simulation.results[0].retval
+      ) {
         return sdk.scValToNative(simulation.results[0].retval);
       }
       return null;
     } else if (txStatus.status === "FAILED") {
-      throw new Error(`Transaction execution failed: ${JSON.stringify(txStatus.resultXdr)}`);
+      throw new Error(
+        `Transaction execution failed: ${JSON.stringify(txStatus.resultXdr)}`
+      );
     }
-    const delayMs = typeof process !== "undefined" && process.env.NODE_ENV === "test" ? 1 : 1000;
+    const delayMs =
+      typeof process !== "undefined" && process.env.NODE_ENV === "test"
+        ? 1
+        : 1000;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     pollAttempts++;
   }
-  
+
   throw new Error("Transaction polling timed out");
 };
 
@@ -672,10 +718,12 @@ const getVault = async (vaultId: number): Promise<StellarVaultData | null> => {
   return vault || null;
 };
 
-const fetchVaultsForAccount = async (account: string): Promise<StellarVaultData[]> => {
+const fetchVaultsForAccount = async (
+  account: string
+): Promise<StellarVaultData[]> => {
   const vaults = getMockStorage<MockVault[]>("vaults", []);
   const target = account.toLowerCase();
-  
+
   // Return vaults where user is a creator or active guardian
   return vaults
     .filter(
@@ -707,7 +755,7 @@ const addDocument = async (
         requiredAccess,
         releaseCondition,
         guardiansList,
-        shares
+        shares,
       ]);
       return Number(docId);
     } catch (err) {
@@ -741,7 +789,9 @@ const addDocument = async (
   return nextId;
 };
 
-const fetchDocumentsForVaults = async (vaultIds: number[]): Promise<StellarDocumentData[]> => {
+const fetchDocumentsForVaults = async (
+  vaultIds: number[]
+): Promise<StellarDocumentData[]> => {
   const docs = getMockStorage<MockDocument[]>("documents", []);
   const set = new Set(vaultIds);
   return docs.filter((d) => set.has(d.vaultId));
@@ -754,7 +804,7 @@ const requestAccess = async (documentId: number): Promise<number> => {
     try {
       const requestId = await executeSorobanCall("request_access", [
         activeAccount,
-        documentId
+        documentId,
       ]);
       return Number(requestId);
     } catch (err) {
@@ -782,7 +832,10 @@ const requestAccess = async (documentId: number): Promise<number> => {
   return nextId;
 };
 
-const approveAccess = async (requestId: number, encryptedShareForBeneficiary?: string): Promise<void> => {
+const approveAccess = async (
+  requestId: number,
+  encryptedShareForBeneficiary?: string
+): Promise<void> => {
   if (!activeAccount) throw new Error("Wallet not connected");
 
   if (isConfigured()) {
@@ -790,7 +843,7 @@ const approveAccess = async (requestId: number, encryptedShareForBeneficiary?: s
       await executeSorobanCall("approve_access", [
         activeAccount,
         requestId,
-        encryptedShareForBeneficiary || null
+        encryptedShareForBeneficiary || null,
       ]);
       return;
     } catch (err) {
@@ -866,13 +919,19 @@ const fetchPendingApprovalsForGuardian = async (
   return pending;
 };
 
-const getEncryptedGuardianShare = async (documentId: number, guardian: string): Promise<string> => {
+const getEncryptedGuardianShare = async (
+  documentId: number,
+  guardian: string
+): Promise<string> => {
   const docs = getMockStorage<MockDocument[]>("documents", []);
   const doc = docs.find((d) => d.id === documentId);
   return doc?.shares?.[guardian] || "";
 };
 
-const getBeneficiaryKeyShare = async (requestId: number, guardian: string): Promise<string> => {
+const getBeneficiaryKeyShare = async (
+  requestId: number,
+  guardian: string
+): Promise<string> => {
   const requests = getMockStorage<MockRequest[]>("requests", []);
   const req = requests.find((r) => r.requestId === requestId);
   return req?.beneficiaryShares?.[guardian] || "";
@@ -881,7 +940,9 @@ const getBeneficiaryKeyShare = async (requestId: number, guardian: string): Prom
 const getPendingInvites = async (account: string): Promise<MockInvite[]> => {
   const invites = getMockStorage<MockInvite[]>("invites", []);
   const target = account.toLowerCase();
-  return invites.filter((inv) => inv.guardian.toLowerCase() === target && !inv.accepted);
+  return invites.filter(
+    (inv) => inv.guardian.toLowerCase() === target && !inv.accepted
+  );
 };
 
 const acceptGuardianInvite = async (vaultId: number): Promise<void> => {
@@ -891,7 +952,7 @@ const acceptGuardianInvite = async (vaultId: number): Promise<void> => {
     try {
       await executeSorobanCall("accept_guardian_invite", [
         activeAccount,
-        vaultId
+        vaultId,
       ]);
       return;
     } catch (err) {
@@ -902,7 +963,9 @@ const acceptGuardianInvite = async (vaultId: number): Promise<void> => {
 
   const invites = getMockStorage<MockInvite[]>("invites", []);
   const invIdx = invites.findIndex(
-    (inv) => inv.vaultId === vaultId && inv.guardian.toLowerCase() === activeAccount!.toLowerCase()
+    (inv) =>
+      inv.vaultId === vaultId &&
+      inv.guardian.toLowerCase() === activeAccount!.toLowerCase()
   );
 
   if (invIdx !== -1) {
@@ -927,7 +990,7 @@ const registerPublicKey = async (publicKey: string): Promise<void> => {
     try {
       await executeSorobanCall("register_public_key", [
         activeAccount,
-        publicKey
+        publicKey,
       ]);
       return;
     } catch (err) {
@@ -944,9 +1007,7 @@ const registerPublicKey = async (publicKey: string): Promise<void> => {
 const getUserPublicKey = async (user: string): Promise<string> => {
   if (isConfigured()) {
     try {
-      const pubKey = await executeSorobanQuery("get_public_key", [
-        user
-      ]);
+      const pubKey = await executeSorobanQuery("get_public_key", [user]);
       return pubKey || "";
     } catch (err) {
       console.error("Soroban get_public_key failed:", err);
@@ -965,7 +1026,9 @@ interface MockToken {
   mintedAt: number;
 }
 
-const fetchUserTokens = async (account: string): Promise<StellarTokenData[]> => {
+const fetchUserTokens = async (
+  account: string
+): Promise<StellarTokenData[]> => {
   if (!account) return [];
   const tokens = getMockStorage<MockToken[]>("tokens", []);
   const target = account.toLowerCase();
@@ -980,7 +1043,10 @@ const fetchUserTokens = async (account: string): Promise<StellarTokenData[]> => 
     }));
 };
 
-const hasVaultToken = async (account: string, vaultId: number): Promise<boolean> => {
+const hasVaultToken = async (
+  account: string,
+  vaultId: number
+): Promise<boolean> => {
   if (!account || !vaultId || vaultId <= 0) return false;
   try {
     const tokens = getMockStorage<MockToken[]>("tokens", []);
@@ -993,7 +1059,7 @@ const hasVaultToken = async (account: string, vaultId: number): Promise<boolean>
     if (isConfigured()) {
       const hasToken = await executeSorobanQuery("has_vault_token", [
         account,
-        vaultId
+        vaultId,
       ]);
       return !!hasToken;
     }
@@ -1014,7 +1080,7 @@ const mintAccessToken = async (
       const tokenId = await executeSorobanCall("mint_access_token", [
         vaultId,
         to,
-        tokenURI
+        tokenURI,
       ]);
       return Number(tokenId);
     } catch (err) {
@@ -1045,9 +1111,18 @@ const registerCrossChainIdentity = async (
   const normEvm = evmAddress.toLowerCase().trim();
   const normStellar = stellarAddress.trim();
 
-  const evmToStellar = getMockStorage<Record<string, string>>("cross_evm_to_stellar", {});
-  const stellarToEvm = getMockStorage<Record<string, string>>("cross_stellar_to_evm", {});
-  const evmToPubkey = getMockStorage<Record<string, string>>("cross_evm_to_pubkey", {});
+  const evmToStellar = getMockStorage<Record<string, string>>(
+    "cross_evm_to_stellar",
+    {}
+  );
+  const stellarToEvm = getMockStorage<Record<string, string>>(
+    "cross_stellar_to_evm",
+    {}
+  );
+  const evmToPubkey = getMockStorage<Record<string, string>>(
+    "cross_evm_to_pubkey",
+    {}
+  );
 
   evmToStellar[normEvm] = normStellar;
   stellarToEvm[normStellar] = normEvm;
@@ -1065,21 +1140,36 @@ const registerCrossChainIdentity = async (
   }
 };
 
-const resolveEvmToStellar = async (evmAddress: string): Promise<string | null> => {
+const resolveEvmToStellar = async (
+  evmAddress: string
+): Promise<string | null> => {
   const normEvm = evmAddress.toLowerCase().trim();
-  const evmToStellar = getMockStorage<Record<string, string>>("cross_evm_to_stellar", {});
+  const evmToStellar = getMockStorage<Record<string, string>>(
+    "cross_evm_to_stellar",
+    {}
+  );
   return evmToStellar[normEvm] || null;
 };
 
-const resolveStellarToEvm = async (stellarAddress: string): Promise<string | null> => {
+const resolveStellarToEvm = async (
+  stellarAddress: string
+): Promise<string | null> => {
   const normStellar = stellarAddress.trim();
-  const stellarToEvm = getMockStorage<Record<string, string>>("cross_stellar_to_evm", {});
+  const stellarToEvm = getMockStorage<Record<string, string>>(
+    "cross_stellar_to_evm",
+    {}
+  );
   return stellarToEvm[normStellar] || null;
 };
 
-const resolveEvmToPublicKey = async (evmAddress: string): Promise<string | null> => {
+const resolveEvmToPublicKey = async (
+  evmAddress: string
+): Promise<string | null> => {
   const normEvm = evmAddress.toLowerCase().trim();
-  const evmToPubkey = getMockStorage<Record<string, string>>("cross_evm_to_pubkey", {});
+  const evmToPubkey = getMockStorage<Record<string, string>>(
+    "cross_evm_to_pubkey",
+    {}
+  );
   if (evmToPubkey[normEvm]) {
     return evmToPubkey[normEvm];
   }
@@ -1093,7 +1183,6 @@ const resolveEvmToPublicKey = async (evmAddress: string): Promise<string | null>
 
   return null;
 };
-
 
 export const stellarService = {
   initialize,
@@ -1134,10 +1223,16 @@ export const stellarService = {
 declare global {
   interface Window {
     freighterApi?: {
-      listen?: (callback: (event: StellarWalletChangeEvent) => void, opts?: { network?: string }) => unknown;
+      listen?: (
+        callback: (event: StellarWalletChangeEvent) => void,
+        opts?: { network?: string }
+      ) => unknown;
     };
     freighter?: {
-      listen?: (callback: (event: StellarWalletChangeEvent) => void, opts?: { network?: string }) => unknown;
+      listen?: (
+        callback: (event: StellarWalletChangeEvent) => void,
+        opts?: { network?: string }
+      ) => unknown;
     };
   }
 }

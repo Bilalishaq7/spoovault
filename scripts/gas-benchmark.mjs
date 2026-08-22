@@ -29,7 +29,9 @@ const BENCHMARK_OUT = path.join(ROOT, "gas-benchmark.json");
 const COMPARISON_OUT = path.join(ROOT, "gas-comparison.md");
 const SUMMARY_OUT = path.join(ROOT, "gas-summary.json");
 
-const REGRESSION_THRESHOLD_PCT = Number(process.env.REGRESSION_THRESHOLD_PCT || "5");
+const REGRESSION_THRESHOLD_PCT = Number(
+  process.env.REGRESSION_THRESHOLD_PCT || "5"
+);
 const ALLOW_FAIL = process.env.FAIL_ON_REGRESSION !== "false";
 const UPDATE_BASELINE = process.env.UPDATE_BASELINE === "true";
 
@@ -98,7 +100,11 @@ function parseGasReport(raw) {
       const method = cols[1];
       const avg = toNum(cols[4]);
       if (avg <= 0) continue;
-      if (/^(contract|method)/i.test(contract) || /^(min|max|avg)/i.test(method)) continue;
+      if (
+        /^(contract|method)/i.test(contract) ||
+        /^(min|max|avg)/i.test(method)
+      )
+        continue;
       if (/^[-–—]+$/.test(contract) || /^[-–—]+$/.test(method)) continue;
       const name =
         method.toLowerCase() === "constructor"
@@ -173,7 +179,13 @@ function buildComparison(entries, baseline) {
       if (pct > REGRESSION_THRESHOLD_PCT) regressionCount += 1;
     }
 
-    rows.push({ ...e, base: typeof base === "number" ? base : null, delta, pct, status });
+    rows.push({
+      ...e,
+      base: typeof base === "number" ? base : null,
+      delta,
+      pct,
+      status,
+    });
   }
 
   return { rows, maxIncreasePct, regressionCount };
@@ -190,7 +202,9 @@ function renderMarkdown(entries, comparison, baselineExists) {
 
   if (comparison.regressionCount > 0) {
     lines.push(
-      `:warning: **${comparison.regressionCount} method(s) regressed beyond the threshold** (max +${comparison.maxIncreasePct.toFixed(
+      `:warning: **${
+        comparison.regressionCount
+      } method(s) regressed beyond the threshold** (max +${comparison.maxIncreasePct.toFixed(
         2
       )}%).`
     );
@@ -210,10 +224,10 @@ function renderMarkdown(entries, comparison, baselineExists) {
   for (const r of comparison.rows) {
     const base = r.base === null ? "—" : String(r.base);
     const sign = r.delta > 0 ? "+" : "";
-    const pctStr =
-      r.base === null ? "—" : `${sign}${r.pct.toFixed(2)}%`;
+    const pctStr = r.base === null ? "—" : `${sign}${r.pct.toFixed(2)}%`;
     let icon = "🆕";
-    if (r.status === "increase" && r.pct > REGRESSION_THRESHOLD_PCT) icon = "🔴";
+    if (r.status === "increase" && r.pct > REGRESSION_THRESHOLD_PCT)
+      icon = "🔴";
     else if (r.status === "increase") icon = "🟡";
     else if (r.status === "decrease") icon = "🟢";
     else if (r.status === "unchanged") icon = "⚪";
@@ -268,7 +282,10 @@ function main() {
 
   const comparison = buildComparison(entries, baseline);
 
-  fs.writeFileSync(BENCHMARK_OUT, JSON.stringify(toBenchmarkFormat(entries), null, 2));
+  fs.writeFileSync(
+    BENCHMARK_OUT,
+    JSON.stringify(toBenchmarkFormat(entries), null, 2)
+  );
   const md = renderMarkdown(entries, comparison, baselineExists);
   fs.writeFileSync(COMPARISON_OUT, md);
 
@@ -289,12 +306,19 @@ function main() {
 
   if (UPDATE_BASELINE) {
     fs.mkdirSync(path.dirname(BASELINE_PATH), { recursive: true });
-    fs.writeFileSync(BASELINE_PATH, JSON.stringify(toBaselineMap(entries), null, 2) + "\n");
-    console.log(`BASELINE: refreshed ${BASELINE_PATH} with ${entries.length} entries.`);
+    fs.writeFileSync(
+      BASELINE_PATH,
+      JSON.stringify(toBaselineMap(entries), null, 2) + "\n"
+    );
+    console.log(
+      `BASELINE: refreshed ${BASELINE_PATH} with ${entries.length} entries.`
+    );
   }
 
   if (summary.hasRegression && ALLOW_FAIL) {
-    console.error(`FAIL: gas regression(s) above +${REGRESSION_THRESHOLD_PCT}% detected.`);
+    console.error(
+      `FAIL: gas regression(s) above +${REGRESSION_THRESHOLD_PCT}% detected.`
+    );
     process.exit(1);
   }
 

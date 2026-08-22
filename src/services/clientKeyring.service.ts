@@ -35,10 +35,15 @@ const sessionKeyCache = new Map<string, string>();
 const memoryStore = new Map<string, KeyPairRecord>();
 
 const isIndexedDBAvailable = (): boolean => {
-  return typeof window !== "undefined" && typeof window.indexedDB !== "undefined";
+  return (
+    typeof window !== "undefined" && typeof window.indexedDB !== "undefined"
+  );
 };
 
-const getEffectivePassphrase = (account: string, pinOrPassphrase?: string): { passphrase: string; isCustomPin: boolean } => {
+const getEffectivePassphrase = (
+  account: string,
+  pinOrPassphrase?: string
+): { passphrase: string; isCustomPin: boolean } => {
   const trimmed = pinOrPassphrase?.trim();
   if (trimmed) {
     return { passphrase: trimmed, isCustomPin: true };
@@ -218,7 +223,10 @@ export const clientKeyringService = {
 
     const normalized = account.toLowerCase();
     const { publicKey, privateKey } = await generateECIESKeyPairBase64();
-    const { passphrase, isCustomPin } = getEffectivePassphrase(normalized, pinOrPassphrase);
+    const { passphrase, isCustomPin } = getEffectivePassphrase(
+      normalized,
+      pinOrPassphrase
+    );
 
     // Encrypt private key with PBKDF2-SHA256 (600,000 iterations) + AES-256-GCM
     const encryptedPrivateKey = await secretsService.encryptWithPassphrase(
@@ -261,7 +269,10 @@ export const clientKeyringService = {
     await importECIESPrivateKey(privateKey);
 
     const normalized = account.toLowerCase();
-    const { passphrase, isCustomPin } = getEffectivePassphrase(normalized, pinOrPassphrase);
+    const { passphrase, isCustomPin } = getEffectivePassphrase(
+      normalized,
+      pinOrPassphrase
+    );
 
     const encryptedPrivateKey = await secretsService.encryptWithPassphrase(
       privateKey,
@@ -375,7 +386,10 @@ export const clientKeyringService = {
     }
 
     const normalized = account.toLowerCase();
-    const privateKey = await this.getDecryptedPrivateKey(normalized, currentPin);
+    const privateKey = await this.getDecryptedPrivateKey(
+      normalized,
+      currentPin
+    );
     const publicKey = (await this.getStoredPublicKey(normalized)) || "";
 
     const encryptedForBackup = await secretsService.encryptWithPassphrase(

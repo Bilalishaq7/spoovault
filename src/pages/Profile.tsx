@@ -1,11 +1,24 @@
 import { useEffect, useState } from "react";
 import { Card, CardBody, CardHeader, Button, Input, Chip } from "@heroui/react";
-import { FiUser, FiSliders, FiSave, FiUsers, FiClock, FiCheckCircle, FiKey, FiDownload, FiLock } from "react-icons/fi";
+import {
+  FiUser,
+  FiSliders,
+  FiSave,
+  FiUsers,
+  FiClock,
+  FiCheckCircle,
+  FiKey,
+  FiDownload,
+  FiLock,
+} from "react-icons/fi";
 import { useWeb3 } from "../context/Web3Context";
 import { formatDate, shortenAddress } from "../utils/helpers";
 import { toast } from "react-hot-toast";
 import { buttonClasses } from "../utils/buttonClasses";
-import { contractService, GuardianInviteData } from "../services/contract.service";
+import {
+  contractService,
+  GuardianInviteData,
+} from "../services/contract.service";
 import { clientKeyringService } from "../services/clientKeyring.service";
 
 interface InviteVaultContext {
@@ -15,11 +28,23 @@ interface InviteVaultContext {
 }
 
 const Profile = () => {
-  const { account, isConnected, connect, provider, signer, isFujiNetwork, switchToFuji } = useWeb3();
+  const {
+    account,
+    isConnected,
+    connect,
+    provider,
+    signer,
+    isFujiNetwork,
+    switchToFuji,
+  } = useWeb3();
   const [nickname, setNickname] = useState("");
   const [theme, setTheme] = useState<"ember" | "midnight">("ember");
-  const [pendingInvites, setPendingInvites] = useState<GuardianInviteData[]>([]);
-  const [inviteVaultContextById, setInviteVaultContextById] = useState<Record<number, InviteVaultContext>>({});
+  const [pendingInvites, setPendingInvites] = useState<GuardianInviteData[]>(
+    []
+  );
+  const [inviteVaultContextById, setInviteVaultContextById] = useState<
+    Record<number, InviteVaultContext>
+  >({});
   const [loadingInvites, setLoadingInvites] = useState(false);
   const [acceptingVaultId, setAcceptingVaultId] = useState<number | null>(null);
   const [publicKey, setPublicKey] = useState("");
@@ -33,7 +58,8 @@ const Profile = () => {
   const [exportingBackup, setExportingBackup] = useState(false);
 
   const profileInputClassNames = {
-    inputWrapper: "bg-gray-900/75 border border-gray-700/80 shadow-none data-[hover=true]:border-gray-600",
+    inputWrapper:
+      "bg-gray-900/75 border border-gray-700/80 shadow-none data-[hover=true]:border-gray-600",
     input: "text-sm text-gray-100",
   };
 
@@ -41,7 +67,10 @@ const Profile = () => {
     try {
       const stored = localStorage.getItem("spoovault-profile");
       if (stored) {
-        const parsed = JSON.parse(stored) as { nickname?: string; theme?: "ember" | "midnight" };
+        const parsed = JSON.parse(stored) as {
+          nickname?: string;
+          theme?: "ember" | "midnight";
+        };
         if (parsed.nickname) {
           setNickname(parsed.nickname);
         }
@@ -115,8 +144,12 @@ const Profile = () => {
         return;
       }
 
-      const inviteVaultIds = new Set<number>(sorted.map((invite) => invite.vaultId));
-      const vaults = await contractService.fetchVaultsByIds(Array.from(inviteVaultIds));
+      const inviteVaultIds = new Set<number>(
+        sorted.map((invite) => invite.vaultId)
+      );
+      const vaults = await contractService.fetchVaultsByIds(
+        Array.from(inviteVaultIds)
+      );
       const contextMap: Record<number, InviteVaultContext> = {};
       vaults.forEach((vault) => {
         if (!inviteVaultIds.has(vault.id)) return;
@@ -194,7 +227,10 @@ const Profile = () => {
       let pubKey = await clientKeyringService.getStoredPublicKey(account);
       if (!pubKey) {
         toast("Generating client-side Web Crypto ECIES keypair...");
-        const result = await clientKeyringService.generateAndSaveKeyPair(account, pin.trim() || undefined);
+        const result = await clientKeyringService.generateAndSaveKeyPair(
+          account,
+          pin.trim() || undefined
+        );
         pubKey = result.publicKey;
       }
 
@@ -204,7 +240,9 @@ const Profile = () => {
         setIsRegisteredOnChain(true);
         toast.success("Encryption public key registered on-chain!");
       } else {
-        toast.success("Encryption key generated securely in browser IndexedDB!");
+        toast.success(
+          "Encryption key generated securely in browser IndexedDB!"
+        );
       }
 
       setPublicKey(pubKey);
@@ -212,7 +250,9 @@ const Profile = () => {
       setPin("");
       setShowPinInput(false);
     } catch (error: any) {
-      toast.error(error.message || "Failed to generate/register encryption key");
+      toast.error(
+        error.message || "Failed to generate/register encryption key"
+      );
     } finally {
       setRegisteringKey(false);
     }
@@ -241,7 +281,10 @@ const Profile = () => {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `spoovault-keyring-backup-${shortenAddress(account, 4)}.json`;
+      link.download = `spoovault-keyring-backup-${shortenAddress(
+        account,
+        4
+      )}.json`;
       link.click();
       URL.revokeObjectURL(url);
 
@@ -259,7 +302,9 @@ const Profile = () => {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Profile</h1>
-          <p className="text-gray-400">Manage your preferences and secure keys</p>
+          <p className="text-gray-400">
+            Manage your preferences and secure keys
+          </p>
         </div>
       </div>
 
@@ -285,7 +330,8 @@ const Profile = () => {
               />
             </div>
             <div className="text-sm text-gray-400">
-              Wallet: {isConnected ? shortenAddress(account || "", 6) : "Not connected"}
+              Wallet:{" "}
+              {isConnected ? shortenAddress(account || "", 6) : "Not connected"}
             </div>
           </CardBody>
         </Card>
@@ -297,7 +343,9 @@ const Profile = () => {
             </div>
             <div>
               <h2 className="text-lg font-semibold">Encryption Key</h2>
-              <p className="text-sm text-gray-400">Web Crypto ECIES for secure sharing</p>
+              <p className="text-sm text-gray-400">
+                Web Crypto ECIES for secure sharing
+              </p>
             </div>
           </CardHeader>
           <CardBody className="space-y-4">
@@ -337,7 +385,9 @@ const Profile = () => {
 
                 {hasLocalKey && (
                   <div className="pt-2 border-t border-gray-800/80 space-y-2">
-                    <p className="text-xs text-gray-400 font-medium">Keyring Backup</p>
+                    <p className="text-xs text-gray-400 font-medium">
+                      Keyring Backup
+                    </p>
                     <div className="flex gap-2">
                       <Input
                         type="password"
@@ -366,7 +416,8 @@ const Profile = () => {
                   NOT GENERATED
                 </Chip>
                 <p className="text-xs text-gray-400">
-                  Generate a client-side Web Crypto ECIES (ECDH P-256) keypair stored securely in browser IndexedDB.
+                  Generate a client-side Web Crypto ECIES (ECDH P-256) keypair
+                  stored securely in browser IndexedDB.
                 </p>
 
                 {showPinInput ? (
@@ -430,13 +481,19 @@ const Profile = () => {
             </div>
             <div>
               <h2 className="text-lg font-semibold">Theme</h2>
-              <p className="text-sm text-gray-400">Choose your preferred look</p>
+              <p className="text-sm text-gray-400">
+                Choose your preferred look
+              </p>
             </div>
           </CardHeader>
           <CardBody className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
               <Button
-                className={theme === "ember" ? buttonClasses.primaryMd : buttonClasses.ghostMd}
+                className={
+                  theme === "ember"
+                    ? buttonClasses.primaryMd
+                    : buttonClasses.ghostMd
+                }
                 onPress={() => setTheme("ember")}
               >
                 <span className="flex items-center gap-2">
@@ -445,7 +502,11 @@ const Profile = () => {
                 </span>
               </Button>
               <Button
-                className={theme === "midnight" ? buttonClasses.primaryMd : buttonClasses.ghostMd}
+                className={
+                  theme === "midnight"
+                    ? buttonClasses.primaryMd
+                    : buttonClasses.ghostMd
+                }
                 onPress={() => setTheme("midnight")}
               >
                 <span className="flex items-center gap-2">
@@ -479,7 +540,9 @@ const Profile = () => {
             </div>
             <div>
               <h2 className="text-lg font-semibold">Guardian Invites</h2>
-              <p className="text-sm text-gray-400">Accept vault invitations assigned to this wallet</p>
+              <p className="text-sm text-gray-400">
+                Accept vault invitations assigned to this wallet
+              </p>
             </div>
           </div>
           <Chip size="sm" variant="flat" color="warning">
@@ -489,22 +552,31 @@ const Profile = () => {
         <CardBody className="space-y-3">
           {!isConnected ? (
             <div className="rounded-2xl border border-gray-800 bg-gray-900/55 p-4 flex items-center justify-between gap-3">
-              <p className="text-sm text-gray-400">Connect wallet to view pending guardian invites.</p>
+              <p className="text-sm text-gray-400">
+                Connect wallet to view pending guardian invites.
+              </p>
               <Button className={buttonClasses.primarySm} onPress={connect}>
                 Connect
               </Button>
             </div>
           ) : !isFujiNetwork ? (
             <div className="rounded-2xl border border-yellow-500/30 bg-yellow-500/10 p-4 flex items-center justify-between gap-3">
-              <p className="text-sm text-yellow-200">Switch to Avalanche Fuji to load and accept invites.</p>
-              <Button className={buttonClasses.outlineSm} onPress={switchToFuji}>
+              <p className="text-sm text-yellow-200">
+                Switch to Avalanche Fuji to load and accept invites.
+              </p>
+              <Button
+                className={buttonClasses.outlineSm}
+                onPress={switchToFuji}
+              >
                 Switch Network
               </Button>
             </div>
           ) : loadingInvites ? (
             <p className="text-sm text-gray-400">Loading pending invites...</p>
           ) : pendingInvites.length === 0 ? (
-            <p className="text-sm text-gray-400">No pending guardian invites.</p>
+            <p className="text-sm text-gray-400">
+              No pending guardian invites.
+            </p>
           ) : (
             pendingInvites.map((invite) => (
               <div
@@ -513,19 +585,28 @@ const Profile = () => {
               >
                 <div className="space-y-1.5 min-w-0">
                   <p className="font-medium truncate">
-                    {inviteVaultContextById[invite.vaultId]?.name || `Vault #${invite.vaultId}`}
+                    {inviteVaultContextById[invite.vaultId]?.name ||
+                      `Vault #${invite.vaultId}`}
                   </p>
                   <p className="text-xs text-gray-400 break-words">
-                    {inviteVaultContextById[invite.vaultId]?.description?.trim() ||
-                      "No vault description provided."}
+                    {inviteVaultContextById[
+                      invite.vaultId
+                    ]?.description?.trim() || "No vault description provided."}
                   </p>
                   <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                    <Chip size="sm" variant="flat" className="bg-gray-900/70 border border-gray-700/70 text-gray-300">
+                    <Chip
+                      size="sm"
+                      variant="flat"
+                      className="bg-gray-900/70 border border-gray-700/70 text-gray-300"
+                    >
                       Vault #{invite.vaultId}
                     </Chip>
                     <span>
                       {inviteVaultContextById[invite.vaultId]?.creator
-                        ? `From owner ${shortenAddress(inviteVaultContextById[invite.vaultId].creator, 6)}`
+                        ? `From owner ${shortenAddress(
+                            inviteVaultContextById[invite.vaultId].creator,
+                            6
+                          )}`
                         : `Assigned to ${shortenAddress(invite.guardian, 6)}`}
                     </span>
                   </div>
