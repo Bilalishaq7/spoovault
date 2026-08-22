@@ -1,5 +1,5 @@
 {
-  "CrossChainIdentityRegistry.bindIdentity": 1527107,
+  "CrossChainIdentityRegistry.bindIdentity": 1520392,
   "ERC6551Registry.createAccount": 131636,
   "SpooAccountImplementation.executeCall": 96365,
   "SpooVault.acceptGuardianInvite": 104192,
