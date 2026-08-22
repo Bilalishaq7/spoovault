@@ -259,7 +259,15 @@ export const Web3Provider = ({ children }: { children: ReactNode }) => {
       try {
         const address = await stellarService.connectWallet();
         setAccount(address);
-        sorobanEventIndexer.start(stellarService.getRpcUrl(), stellarService.getContractId());
+        
+        // Start Soroban event indexer with enhanced configuration
+        const relayUrl = import.meta.env.VITE_SOROBAN_EVENT_RELAY_URL as string | undefined;
+        sorobanEventIndexer.start(
+          stellarService.getRpcUrl(), 
+          stellarService.getContractId(),
+          relayUrl
+        );
+        
         setProvider(null);
         setSigner(null);
         setChainId(null);

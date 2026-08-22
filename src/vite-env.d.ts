@@ -24,6 +24,7 @@ interface ImportMetaEnv {
   readonly VITE_PIR_TOR_PORT?: string;
   readonly VITE_PIR_DUMMY_COUNT?: string;
   readonly VITE_PIR_BATCH_DELAY?: string;
+  readonly VITE_SOROBAN_EVENT_RELAY_URL?: string;
 }
 
 interface ImportMeta {
