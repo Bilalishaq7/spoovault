@@ -1,4 +1,5 @@
 {
+  "CrossChainIdentityRegistry.bindIdentity": 1527107,
   "ERC6551Registry.createAccount": 131636,
   "SpooAccountImplementation.executeCall": 96365,
   "SpooVault.acceptGuardianInvite": 104192,
@@ -18,9 +19,11 @@
   "SpooVault.setEmergencyMode": 55571,
   "SpooVault.transferFrom": 99293,
   "VDFVerifier.verifyWesolowski": 29972,
+  "VDFVerifier.CrossChainIdentityRegistry": 1913160,
   "VDFVerifier.ERC6551Registry": 370327,
   "VDFVerifier.SpooAccountImplementation": 489512,
   "VDFVerifier.SpooVault": 5155028,
   "VDFVerifier.SpooVaultConsumer": 280605,
+  "VDFVerifier.TestEd25519": 1300089,
   "VDFVerifier.constructor": 432861
 }
