@@ -47,6 +47,7 @@ export type FreighterShim = {
   getAddress: () => Promise<string>;
   signTransaction?: (xdr: string, opts?: any) => Promise<string>;
   signAuthEntry?: (preimageXdr: string, opts?: any) => Promise<{ signedAuthEntry: string; error?: string }>;
+  signBlob?: (blob: string, opts?: any) => Promise<string>;
   getNetwork?: () => Promise<unknown>;
   listen?: (callback: (event: StellarWalletChangeEvent) => void) => unknown;
 };
@@ -99,6 +100,7 @@ const loadFreighter = async (): Promise<FreighterShim> => {
       },
       signTransaction: mod.signTransaction,
       signAuthEntry: mod.signAuthEntry,
+      signBlob: typeof mod?.signBlob === "function" ? mod.signBlob : undefined,
       getNetwork: typeof mod?.getNetwork === "function" ? mod.getNetwork : undefined,
       listen: typeof mod?.listen === "function" ? mod.listen : undefined,
     };
@@ -110,6 +112,7 @@ const loadFreighter = async (): Promise<FreighterShim> => {
       getAddress: async () => "",
       signTransaction: async () => "",
       signAuthEntry: async () => ({ signedAuthEntry: "" }),
+      signBlob: async () => "",
     };
   }
   return _freighter;
@@ -191,6 +194,137 @@ const isSigningRejection = (error: unknown): boolean => {
     return /(declined|rejected|cancel|denied|refused)/.test(message);
   }
   return false;
+// ---------------------------------------------------------------------------
+// Cross-chain identity binding registry (issue #131)
+// ---------------------------------------------------------------------------
+// The Soroban `identity_registry` module (and the EVM
+// `CrossChainIdentityRegistry.sol` contract) verify BOTH the Stellar
+// (Ed25519) and EVM (secp256k1) signatures of
+// `BindIdentity(evmAddr, stellarPubkey, timestamp)` on-chain before recording
+// a binding. These helpers build and sign the shared payload.
+
+const BIND_IDENTITY_PREFIX = "BindIdentity";
+
+let identityRegistryContractId = "";
+
+export const getIdentityRegistryContractId = (): string => {
+  const cid = import.meta.env.VITE_IDENTITY_REGISTRY_ADDRESS as string | undefined;
+  return cid || identityRegistryContractId;
+};
+
+const isIdentityRegistryConfigured = (): boolean => !!getIdentityRegistryContractId();
+
+const hexToBytes = (hex: string): Uint8Array => {
+  const clean = hex.replace(/^0x/i, "");
+  if (clean.length % 2 !== 0) throw new Error("Invalid hex string");
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+};
+
+const bytesToHex = (bytes: Uint8Array | ArrayBuffer): string => {
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  return Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("");
+};
+
+const bytesToBase64 = (bytes: Uint8Array): string => {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+};
+
+const base64ToBytes = (b64: string): Uint8Array => {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+};
+
+const loadEthers = async (): Promise<any> => {
+  try {
+    return await import("ethers");
+  } catch {
+    throw new Error("ethers is not installed or failed to load");
+  }
+};
+
+const loadTweetNacl = async (): Promise<any> => {
+  try {
+    return await import("tweetnacl");
+  } catch {
+    throw new Error("tweetnacl is not installed or failed to load");
+  }
+};
+
+/**
+ * Build the 72-byte payload that both wallets sign:
+ * "BindIdentity" || evmAddress(20) || stellarPublicKey(32) || timestamp(8, BE)
+ */
+const buildIdentityBindingPayload = (
+  evmAddressBytes: Uint8Array,
+  stellarPublicKeyBytes: Uint8Array,
+  timestamp: number
+): Uint8Array => {
+  const payload = new Uint8Array(12 + 20 + 32 + 8);
+  payload.set(new TextEncoder().encode(BIND_IDENTITY_PREFIX), 0);
+  payload.set(evmAddressBytes, 12);
+  payload.set(stellarPublicKeyBytes, 32);
+  new DataView(payload.buffer).setBigUint64(64, BigInt(Math.floor(timestamp)), false);
+  return payload;
+};
+
+/**
+ * Compute the 32-byte message hash both wallets sign for a binding.
+ * @returns 0x-prefixed hex of keccak256(payload)
+ */
+const buildIdentityBindingMessageHash = async (
+  evmAddress: string,
+  stellarAddress: string,
+  timestamp: number
+): Promise<string> => {
+  const sdk = await loadStellarSdk();
+  const stellarPubkey = sdk.StrKey.decodeEd25519PublicKey(stellarAddress);
+  const evmBytes = hexToBytes(evmAddress);
+  if (evmBytes.length !== 20) throw new Error("Invalid EVM address");
+  const payload = buildIdentityBindingPayload(evmBytes, Uint8Array.from(stellarPubkey), timestamp);
+  const ethersMod = await loadEthers();
+  return ethersMod.keccak256(payload);
+};
+
+/**
+ * Encode a 32-byte Ed25519 public key as a Stellar G-address.
+ */
+const encodeStellarPublicKey = async (publicKeyHex: string): Promise<string> => {
+  const sdk = await loadStellarSdk();
+  const bytes = hexToBytes(publicKeyHex);
+  if (bytes.length !== 32) throw new Error("Invalid Stellar public key length");
+  return sdk.StrKey.encodeEd25519PublicKey(bytes);
+};
+
+/**
+ * Normalize the ScVal struct returned by the Soroban identity registry into a
+ * plain JS object. Bytes fields come back as Buffers from scValToNative.
+ */
+const normalizeBindingResult = (result: any): { evmAddress: string; stellarPublicKey: string; timestamp: number } | null => {
+  if (!result || typeof result !== "object") return null;
+  const rawEvm = result?.evm_address ?? result?.evmAddress ?? null;
+  const rawPk = result?.stellar_pubkey ?? result?.stellarPublicKey ?? null;
+  const rawTs = result?.timestamp ?? null;
+  if (rawPk === null || rawTs === null) return null;
+  const toHexString = (v: any): string => {
+    if (typeof v === "string") return v.startsWith("0x") ? v : `0x${v}`;
+    if (v instanceof Uint8Array || (typeof Buffer !== "undefined" && Buffer.isBuffer(v))) {
+      return `0x${bytesToHex(v as Uint8Array)}`;
+    }
+    return "";
+  };
+  return {
+    evmAddress: toHexString(rawEvm),
+    stellarPublicKey: toHexString(rawPk),
+    timestamp: Number(rawTs),
+  };
 };
 
 const isConfigured = (): boolean => {
@@ -463,11 +597,12 @@ interface MockInvite {
 
 const executeSorobanQuery = async (
   functionName: string,
-  args: any[]
+  args: any[],
+  contractAddressOverride?: string
 ): Promise<any> => {
   const sdk = await loadStellarSdk();
   const server = new sdk.rpc.Server(sorobanRpcUrl);
-  const contractAddress = getContractId();
+  const contractAddress = contractAddressOverride || getContractId();
   
   const sourceAddress = activeAccount || "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
   const sourceAccount = new sdk.Account(sourceAddress, "0");
@@ -509,13 +644,14 @@ const executeSorobanQuery = async (
 
 const executeSorobanCall = async (
   functionName: string,
-  args: any[]
+  args: any[],
+  contractAddressOverride?: string
 ): Promise<any> => {
   if (!activeAccount) throw new Error("Wallet not connected");
   
   const sdk = await loadStellarSdk();
   const server = new sdk.rpc.Server(sorobanRpcUrl);
-  const contractAddress = getContractId();
+  const contractAddress = contractAddressOverride || getContractId();
   
   // 1. Fetch source account
   const sourceAccount = await server.getAccount(activeAccount);
@@ -1003,11 +1139,11 @@ const mintAccessToken = async (
   return nextId;
 };
 
-const registerCrossChainIdentity = async (
-  stellarAddress: string,
+const saveCrossChainBindingMock = (
   evmAddress: string,
+  stellarAddress: string,
   publicKey?: string
-): Promise<void> => {
+): void => {
   const normEvm = evmAddress.toLowerCase().trim();
   const normStellar = stellarAddress.trim();
 
@@ -1031,16 +1167,195 @@ const registerCrossChainIdentity = async (
   }
 };
 
+const registerCrossChainIdentity = async (
+  stellarAddress: string,
+  evmAddress: string,
+  publicKey?: string
+): Promise<void> => {
+  saveCrossChainBindingMock(evmAddress, stellarAddress, publicKey);
+};
+
 const resolveEvmToStellar = async (evmAddress: string): Promise<string | null> => {
   const normEvm = evmAddress.toLowerCase().trim();
+
+  if (isIdentityRegistryConfigured()) {
+    try {
+      const binding = normalizeBindingResult(
+        await executeSorobanQuery(
+          "resolve_evm_to_stellar",
+          [hexToBytes(normEvm)],
+          getIdentityRegistryContractId()
+        )
+      );
+      if (binding?.stellarPublicKey) {
+        return encodeStellarPublicKey(binding.stellarPublicKey);
+      }
+    } catch (err) {
+      console.error("Soroban resolve_evm_to_stellar failed:", err);
+    }
+  }
+
   const evmToStellar = getMockStorage<Record<string, string>>("cross_evm_to_stellar", {});
   return evmToStellar[normEvm] || null;
 };
 
 const resolveStellarToEvm = async (stellarAddress: string): Promise<string | null> => {
   const normStellar = stellarAddress.trim();
+
+  if (isIdentityRegistryConfigured()) {
+    try {
+      const sdk = await loadStellarSdk();
+      const pubkey = sdk.StrKey.decodeEd25519PublicKey(normStellar);
+      const binding = normalizeBindingResult(
+        await executeSorobanQuery(
+          "resolve_stellar_to_evm",
+          [Uint8Array.from(pubkey)],
+          getIdentityRegistryContractId()
+        )
+      );
+      if (binding?.evmAddress) {
+        return binding.evmAddress.toLowerCase();
+      }
+    } catch (err) {
+      console.error("Soroban resolve_stellar_to_evm failed:", err);
+    }
+  }
+
   const stellarToEvm = getMockStorage<Record<string, string>>("cross_stellar_to_evm", {});
   return stellarToEvm[normStellar] || null;
+};
+
+// ---------------------------------------------------------------------------
+// Dual-signed identity binding (MetaMask + Freighter)
+// ---------------------------------------------------------------------------
+
+export interface CrossChainIdentityBinding {
+  evmAddress: string;
+  stellarAddress: string;
+  stellarPublicKey: string;
+  timestamp: number;
+  /** 65-byte EIP-191 signature (r || s || v) from MetaMask personal_sign. */
+  evmSignature: string;
+  /** 64-byte Ed25519 signature over the message hash from Freighter signBlob. */
+  stellarSignature: string;
+}
+
+/**
+ * Split a 65-byte EIP-191 signature into (r || s) and the recovery id.
+ * Accepts v as 27/28 or 0/1.
+ */
+const splitEvmSignature = (signatureHex: string): { rs: string; recoveryId: number } => {
+  const bytes = hexToBytes(signatureHex);
+  if (bytes.length !== 65) throw new Error("EVM signature must be 65 bytes");
+  const v = bytes[64];
+  const recoveryId = v === 27 || v === 28 ? v - 27 : v;
+  if (recoveryId !== 0 && recoveryId !== 1) throw new Error("Invalid EVM signature recovery id");
+  return { rs: `0x${bytesToHex(bytes.slice(0, 64))}`, recoveryId };
+};
+
+/**
+ * Record a dual-signed EVM <-> Stellar identity binding.
+ *
+ * When the Soroban identity registry is configured the binding is submitted
+ * on-chain (both signatures are verified by the contract and invalid or
+ * single-signed requests revert). Otherwise the signatures are verified
+ * locally and the binding is recorded in the mock store.
+ */
+const bindIdentity = async (binding: CrossChainIdentityBinding): Promise<void> => {
+  const { evmAddress, stellarAddress, stellarPublicKey, timestamp, evmSignature, stellarSignature } = binding;
+  if (!evmAddress || !stellarAddress || !stellarPublicKey) {
+    throw new Error("Missing binding addresses");
+  }
+  if (!evmSignature || !stellarSignature) {
+    throw new Error("Both EVM and Stellar signatures are required");
+  }
+  const evmBytes = hexToBytes(evmAddress);
+  const pkBytes = hexToBytes(stellarPublicKey);
+  if (evmBytes.length !== 20) throw new Error("Invalid EVM address");
+  if (pkBytes.length !== 32) throw new Error("Invalid Stellar public key");
+
+  if (isIdentityRegistryConfigured()) {
+    const { rs, recoveryId } = splitEvmSignature(evmSignature);
+    try {
+      await executeSorobanCall(
+        "bind_identity",
+        [
+          evmBytes,
+          pkBytes,
+          Math.floor(timestamp),
+          hexToBytes(rs),
+          recoveryId,
+          hexToBytes(stellarSignature),
+        ],
+        getIdentityRegistryContractId()
+      );
+      return;
+    } catch (err) {
+      console.error("Soroban bind_identity failed:", err);
+      throw err;
+    }
+  }
+
+  // Fallback: verify both signatures locally before recording.
+  const messageHash = await buildIdentityBindingMessageHash(evmAddress, stellarAddress, timestamp);
+  const ethersMod = await loadEthers();
+  const recovered = ethersMod.verifyMessage(ethersMod.getBytes(messageHash), evmSignature);
+  if (recovered.toLowerCase() !== evmAddress.toLowerCase()) {
+    throw new Error("Invalid EVM signature for identity binding");
+  }
+
+  const nacl = await loadTweetNacl();
+  const stellarOk = nacl.sign.detached.verify(
+    ethersMod.getBytes(messageHash),
+    hexToBytes(stellarSignature),
+    pkBytes
+  );
+  if (!stellarOk) {
+    throw new Error("Invalid Stellar signature for identity binding");
+  }
+
+  saveCrossChainBindingMock(evmAddress, stellarAddress, stellarPublicKey);
+};
+
+/**
+ * Sign the binding message hash with MetaMask (EIP-191 personal_sign).
+ * @returns the 65-byte signature and the recovery id (0/1).
+ */
+const signIdentityBindingWithMetaMask = async (
+  messageHash: string,
+  signer?: { signMessage: (message: Uint8Array) => Promise<string> }
+): Promise<{ signature: string; recoveryId: number }> => {
+  const ethersMod = await loadEthers();
+  let activeSigner: { signMessage: (message: Uint8Array) => Promise<string> };
+  if (signer) {
+    activeSigner = signer;
+  } else {
+    if (typeof window === "undefined" || !window.ethereum) {
+      throw new Error("MetaMask wallet is not available");
+    }
+    const provider = new ethersMod.BrowserProvider(window.ethereum);
+    activeSigner = await provider.getSigner();
+  }
+  const signature = await activeSigner.signMessage(ethersMod.getBytes(messageHash));
+  const parsed = ethersMod.Signature.from(signature);
+  return { signature, recoveryId: parsed.yParity };
+};
+
+/**
+ * Sign the binding message hash with Freighter (Ed25519 signBlob).
+ * @returns the 64-byte Ed25519 signature as 0x-prefixed hex.
+ */
+const signIdentityBindingWithFreighter = async (messageHash: string): Promise<string> => {
+  const freighter = await loadFreighter();
+  if (typeof freighter.signBlob !== "function") {
+    throw new Error("Freighter signBlob is not available");
+  }
+  const blob = bytesToBase64(hexToBytes(messageHash));
+  const signed = await freighter.signBlob(blob);
+  if (!signed) {
+    throw new Error("Freighter signing was rejected");
+  }
+  return `0x${bytesToHex(base64ToBytes(signed))}`;
 };
 
 const resolveEvmToPublicKey = async (evmAddress: string): Promise<string | null> => {
@@ -1059,7 +1374,6 @@ const resolveEvmToPublicKey = async (evmAddress: string): Promise<string | null>
 
   return null;
 };
-
 
 export const stellarService = {
   initialize,
@@ -1092,6 +1406,11 @@ export const stellarService = {
   resolveEvmToStellar,
   resolveStellarToEvm,
   resolveEvmToPublicKey,
+  buildIdentityBindingMessageHash,
+  signIdentityBindingWithMetaMask,
+  signIdentityBindingWithFreighter,
+  bindIdentity,
+  getIdentityRegistryContractId,
   isConfigured,
   setMockStellarSdk,
   setMockFreighter,
