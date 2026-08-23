@@ -4,13 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = "21.0.0"
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+# Crypto helpers used by the identity_registry test suite to produce the
+# dual-signed binding payloads (Ed25519 + secp256k1 + keccak256).
+ed25519-dalek = "2.2.0"
+k256 = { version = "0.13.1", features = ["ecdsa"] }
+sha3 = "0.10.8"
 
 [profile.release]
 opt-level = "z"
