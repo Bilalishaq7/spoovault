@@ -103,7 +103,7 @@ class EventStore {
     if (typeof indexedDB === "undefined") return Promise.reject(new Error("IndexedDB unavailable"));
     if (!this.dbPromise) this.dbPromise = new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, 2);
-      request.onupgradeneeded = (event) => {
+      request.onupgradeneeded = (_event) => {
         const db = request.result;
         
         // Main events store
