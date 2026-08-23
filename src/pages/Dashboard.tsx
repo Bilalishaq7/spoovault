@@ -42,7 +42,6 @@ import { verifyShare, parseEncryptedMetadataPayload } from "../services/secrets.
 
 import { AuditLogTimeline } from "../components/audit/AuditLogTimeline";
 import { getExplorerTxUrl } from "../utils/explorer";
-import { InheritanceSettings } from "../components/vaults/InheritanceSettings";
 
 const DASHBOARD_CACHE_PREFIX = "spoovault-dashboard-cache";
 const DASHBOARD_CACHE_MAX_AGE_MS = 2 * 60 * 1000;
@@ -1070,23 +1069,6 @@ const Dashboard = () => {
           )}
         </CardBody>
       </Card>
-
-      {/* Vault Inheritance & Dead-Man Switch Section */}
-      {vaults.length > 0 && (
-        <div className="mt-8">
-          <InheritanceSettings
-            vaultId={vaults[0].id}
-            vaultName={vaults[0].name}
-            isOwner={true}
-            onRecordProofOfLife={async (id) => {
-              await contractService.recordProofOfLife(id);
-            }}
-            onToggleEmergencyMode={async (id, enabled) => {
-              await contractService.setEmergencyMode(id, enabled);
-            }}
-          />
-        </div>
-      )}
 
       {/* Compliance & Audit Log Timeline */}
       <div className="mt-8">
