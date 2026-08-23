@@ -13,9 +13,17 @@ module.exports = {
     version: "0.8.24",
     settings: {
       evmVersion: "cancun",
+      viaIR: true,
       optimizer: {
         enabled: true,
         runs: 200,
+      },
+      // Dropping the CBOR metadata hash from deployed bytecode buys back size
+      // margin against the EIP-170 24,576-byte contract-size limit at zero
+      // gas/behavior cost — SpooVault.sol otherwise compiles to within a few
+      // bytes of that cap.
+      metadata: {
+        bytecodeHash: "none",
       },
     },
   },
@@ -26,6 +34,9 @@ module.exports = {
     showMethodSig: false,
   },
   networks: {
+    hardhat: {
+      allowUnlimitedContractSize: true,
+    },
     fuji: {
       url: process.env.VITE_AVALANCHE_RPC || "https://api.avax-test.network/ext/bc/C/rpc",
       accounts: process.env.DEPLOYER_PRIVATE_KEY
