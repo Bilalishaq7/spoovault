@@ -163,6 +163,8 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard, EIP712 {
     error ProposalAlreadyExecuted();
     error ApprovalAlreadyGiven();
     error CannotSelfApproveAccess();
+    error ZeroAddressBeneficiary();
+    error BeneficiaryAlreadySet();
     error InvalidNewPublicKey();
     error KeyOwnershipProofFailed();
     error KeyAlreadyRevoked();
@@ -225,6 +227,7 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard, EIP712 {
     // (via link_cross_chain_vault) need this enabled.
     mapping(uint256 => bool) public crossChainRevocationEnabled;
     mapping(uint256 => VaultReleaseState) private _vaultReleaseStates;
+    mapping(uint256 => address) private _vaultBeneficiary;
 
     // ------------------------------------------------------------------
     // VRF-backed emergency unlock delay (issue #93).
@@ -326,6 +329,7 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard, EIP712 {
         string vaultGid
     );
     event EmergencyModeUpdated(uint256 indexed vaultId, bool enabled);
+    event BeneficiarySet(uint256 indexed vaultId, address indexed beneficiary);
     event DocumentReleaseConditionSet(uint256 indexed documentId, ReleaseCondition condition);
     event PublicKeyRegistered(address indexed user, string publicKey);
     event KeyRevoked(address indexed user, string oldPublicKey, string newPublicKey, uint256 rotationCount);
@@ -768,6 +772,26 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard, EIP712 {
         }
 
         emit EmergencyModeUpdated(vaultId, enabled);
+    }
+
+    /**
+     * @dev Owner-supplied beneficiary wallet address used to route emergency/post-death
+     * notifications. Settable once per vault; there is no update path by design.
+     */
+    function setBeneficiary(uint256 vaultId, address beneficiary) external nonReentrant {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
+        if (!vaults[vaultId].isActive) revert VaultNotActive();
+        if (beneficiary == address(0)) revert ZeroAddressBeneficiary();
+        if (_vaultBeneficiary[vaultId] != address(0)) revert BeneficiaryAlreadySet();
+
+        _vaultBeneficiary[vaultId] = beneficiary;
+        emit BeneficiarySet(vaultId, beneficiary);
+    }
+
+    /// @notice Returns the beneficiary wallet address configured for `vaultId`, or the zero address if unset.
+    function getBeneficiary(uint256 vaultId) external view returns (address) {
+        return _vaultBeneficiary[vaultId];
     }
 
     /**

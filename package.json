@@ -22,6 +22,7 @@
     "e2e:evm": "HEADLESS=true npx playwright test",
     "e2e:stellar": "node e2e/soroban/soroban-flow.test.mjs",
     "proxy:pinata": "node scripts/pinata-proxy.mjs",
+    "proxy:push-notifications": "node scripts/push-notification-proxy.mjs",
     "gateway:soroban": "node scripts/soroban-event-gateway.mjs"
   },
   "dependencies": {
