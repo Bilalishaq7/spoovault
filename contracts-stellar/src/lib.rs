@@ -1,8 +1,22 @@
 #![no_std]
+// Soroban SDK macros emit `cfg(testutils)` which newer rustc check-cfg flags.
+#![allow(unexpected_cfgs)]
+// Public contract entrypoints intentionally take many args (env + auth + payload).
+#![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contractimpl, contracttype, Address, Env, IntoVal, String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error,
+    xdr::ToXdr,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
+
+/// Zero-pads a `u64` into a 32-byte big-endian word, matching how Solidity's
+/// `abi.encodePacked` serializes a `uint256`.
+fn u256_be(value: u64) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[24..32].copy_from_slice(&value.to_be_bytes());
+    buf
+}
 
 /// Ledger constants for TTL extension thresholds and bump amounts (~5s per ledger)
 /// ~7 days = 120,960 ledgers
@@ -13,6 +27,25 @@ pub const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
 pub const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
 /// ~30 days = 518,400 ledgers
 pub const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;
+
+/// Current persistent-storage schema version. Bumped whenever an upgrade
+/// changes the meaning/layout of existing storage; `migrate` transforms
+/// storage from a prior version up to this one and is a no-op once the
+/// stored `DataKey::SchemaVersion` already matches.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum UpgradeError {
+    /// `init_admins` has not been called yet, so there is no admin set to
+    /// authorize against.
+    NotInitialized = 1,
+    /// The caller is not a member of the configured admin set.
+    UnauthorizedAdmin = 2,
+    /// The caller already approved the currently pending upgrade proposal.
+    AlreadyApproved = 3,
+}
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,6 +127,23 @@ pub struct VaultReleaseState {
     pub last_proof_of_life: u64,
 }
 
+/// A pending contract-code upgrade awaiting the configured admin threshold
+/// of distinct approvals before the Wasm swap is executed.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UpgradeProposal {
+    pub new_wasm_hash: BytesN<32>,
+    pub approved_by: Vec<Address>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CrossChainHeartbeatBinding {
+    pub gid_hash: BytesN<32>,
+    pub evm_owner: BytesN<20>,
+    pub relayer: Address,
+}
+
 #[contracttype]
 pub enum DataKey {
     VaultCount,
@@ -115,10 +165,20 @@ pub enum DataKey {
     ReleaseState(u64),
     // Optional external registry contract notified on document access grants
     AccessRegistry(u64),
+    CrossChainHeartbeat(u64),
     // Cross-Chain Identity Lookup Map
     EvmToStellar(String),
     StellarToEvm(Address),
     EvmToPubKey(String),
+    // Cross-Chain Revocation Broadcast Engine
+    VaultGid(BytesN<32>),
+    CrossChainRevoker(u64),
+    RevocationNonce(BytesN<32>, u64, Address),
+    // Upgrade governance
+    Admins,
+    AdminThreshold,
+    UpgradeProposal,
+    SchemaVersion,
 }
 
 #[contract]
@@ -158,6 +218,190 @@ impl SpooVaultStellar {
         if env.storage().persistent().has(&req_key) {
             Self::bump_persistent(&env, &req_key);
         }
+    }
+
+    /// Contract code version. Bumped by whoever ships a new Wasm build;
+    /// used by upgrade integration tests to confirm a Wasm swap actually
+    /// took effect (a fresh client built against the new build's ABI will
+    /// observe the new version).
+    pub fn version(_env: Env) -> u32 {
+        1
+    }
+
+    // -------------------------------------------------------------------
+    // Upgrade governance
+    //
+    // A dedicated, contract-wide admin set (distinct from any vault's
+    // per-vault guardians) authorizes Wasm code upgrades. `upgrade_contract`
+    // mirrors `approve_access`'s established pattern in this contract: each
+    // admin calls the same entry point once, their approval is recorded,
+    // and once the configured threshold of distinct admins has approved the
+    // *same* `new_wasm_hash`, the swap executes automatically within that
+    // triggering call - there is no separate "propose" vs "execute" step.
+    // -------------------------------------------------------------------
+
+    /// One-time admin governance bootstrap. Every supplied admin must
+    /// individually authorize this call (rather than trusting a single
+    /// deployer to unilaterally hand admin power to addresses that never
+    /// consented). Reverts if admins are already initialized.
+    pub fn init_admins(env: Env, admins: Vec<Address>, threshold: u32) {
+        assert!(
+            !env.storage().instance().has(&DataKey::Admins),
+            "Admins already initialized"
+        );
+
+        let mut processed = Vec::new(&env);
+        for i in 0..admins.len() {
+            let admin = admins.get(i).unwrap();
+            admin.require_auth();
+            assert!(!processed.contains(&admin), "Duplicate admin found");
+            processed.push_back(admin.clone());
+        }
+
+        assert!(
+            threshold > 0 && threshold <= admins.len(),
+            "Invalid admin threshold"
+        );
+
+        env.storage().instance().set(&DataKey::Admins, &admins);
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminThreshold, &threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
+        Self::bump_instance(&env);
+    }
+
+    /// Returns the configured admin set (empty if `init_admins` has not
+    /// been called yet).
+    pub fn get_admins(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admins)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the configured admin approval threshold (0 if `init_admins`
+    /// has not been called yet).
+    pub fn get_admin_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AdminThreshold)
+            .unwrap_or(0)
+    }
+
+    /// Propose or co-sign a Wasm code upgrade to `new_wasm_hash`.
+    ///
+    /// `new_wasm_hash` must already be present on the ledger (uploaded via
+    /// `env.deployer().upload_contract_wasm`). Each call by a distinct
+    /// configured admin counts as one approval toward the configured
+    /// threshold. A call proposing a different hash than the currently
+    /// pending proposal (or the first call) starts a fresh proposal with
+    /// only that admin's approval recorded. Once enough distinct admins
+    /// have approved the *same* hash, the Wasm code is swapped atomically
+    /// within this same invocation via
+    /// `env.deployer().update_current_contract_wasm` - existing instance
+    /// and persistent storage is untouched by the swap itself (Soroban
+    /// storage is keyed by contract ID, not by the executing Wasm code), so
+    /// no data migration is required unless the new code changes how
+    /// existing storage should be interpreted (see `migrate`).
+    ///
+    /// Reverts with `UpgradeError::UnauthorizedAdmin` if `admin` is not in
+    /// the configured admin set, or `UpgradeError::NotInitialized` if
+    /// `init_admins` has not been called yet.
+    pub fn upgrade_contract(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+        Self::bump_instance(&env);
+
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admins)
+            .unwrap_or_else(|| panic_with_error!(&env, UpgradeError::NotInitialized));
+        if !admins.contains(&admin) {
+            panic_with_error!(&env, UpgradeError::UnauthorizedAdmin);
+        }
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminThreshold)
+            .unwrap_or(0);
+
+        let mut proposal: UpgradeProposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeProposal)
+            .unwrap_or(UpgradeProposal {
+                new_wasm_hash: new_wasm_hash.clone(),
+                approved_by: Vec::new(&env),
+            });
+
+        // A proposal for a different hash supersedes any stale pending one.
+        if proposal.new_wasm_hash != new_wasm_hash {
+            proposal = UpgradeProposal {
+                new_wasm_hash: new_wasm_hash.clone(),
+                approved_by: Vec::new(&env),
+            };
+        }
+
+        if proposal.approved_by.contains(&admin) {
+            panic_with_error!(&env, UpgradeError::AlreadyApproved);
+        }
+        proposal.approved_by.push_back(admin.clone());
+
+        if proposal.approved_by.len() >= threshold {
+            env.storage().instance().remove(&DataKey::UpgradeProposal);
+            env.deployer()
+                .update_current_contract_wasm(new_wasm_hash.clone());
+            env.events()
+                .publish((Symbol::new(&env, "contract_upgraded"),), new_wasm_hash);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeProposal, &proposal);
+        }
+    }
+
+    /// Post-upgrade storage migration hook, callable by any configured
+    /// admin. Idempotent per schema version: transforms persistent storage
+    /// laid out by a prior contract version and bumps
+    /// `DataKey::SchemaVersion` so re-invocation after that is a no-op.
+    /// Currently a no-op body (schema version 1 is the only version that
+    /// has existed); a future upgrade that changes the storage layout
+    /// implements its transformation here and bumps `CURRENT_SCHEMA_VERSION`.
+    ///
+    /// Reverts with `UpgradeError::UnauthorizedAdmin` if `admin` is not in
+    /// the configured admin set.
+    pub fn migrate(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::bump_instance(&env);
+
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admins)
+            .unwrap_or_else(|| panic_with_error!(&env, UpgradeError::NotInitialized));
+        if !admins.contains(&admin) {
+            panic_with_error!(&env, UpgradeError::UnauthorizedAdmin);
+        }
+
+        let current: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SchemaVersion)
+            .unwrap_or(1);
+        if current >= CURRENT_SCHEMA_VERSION {
+            return;
+        }
+
+        // Storage-layout transformations for schema versions below
+        // CURRENT_SCHEMA_VERSION are added here as the schema evolves.
+
+        env.storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
     }
 
     /// Register a user's encryption public key
@@ -423,13 +667,20 @@ impl SpooVaultStellar {
         uploader.require_auth();
         Self::bump_instance(&env);
 
+        let vault: Vault = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Vault(vault_id))
+            .expect("Vault not found");
+        assert!(vault.is_active, "Vault is deactivated");
+
         let is_guard: bool = env
             .storage()
             .persistent()
             .get(&DataKey::IsGuardian(vault_id, uploader.clone()))
             .unwrap_or(false);
         assert!(is_guard, "Only guardians can upload documents");
-        assert!(ipfs_hash.len() > 0, "IPFS hash required");
+        assert!(!ipfs_hash.is_empty(), "IPFS hash required");
         assert!(
             guardians_list.len() == shares.len(),
             "Guardians list and shares count mismatch"
@@ -488,6 +739,13 @@ impl SpooVaultStellar {
             .get(&doc_key)
             .expect("Document not found");
         Self::bump_persistent(&env, &doc_key);
+
+        let vault: Vault = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Vault(doc.vault_id))
+            .expect("Vault not found");
+        assert!(vault.is_active, "Vault is deactivated");
 
         let has_acc: bool = env
             .storage()
@@ -571,6 +829,7 @@ impl SpooVaultStellar {
             .persistent()
             .get(&vault_key)
             .expect("Vault not found");
+        assert!(vault.is_active, "Vault is deactivated");
 
         let is_guard_key = DataKey::IsGuardian(doc.vault_id, approver.clone());
         let is_guard: bool = env
@@ -651,6 +910,105 @@ impl SpooVaultStellar {
         Self::bump_persistent(&env, &rel_key);
     }
 
+    /// Bind a Soroban vault to its Avalanche vault GID and authorized relayer.
+    pub fn bind_cross_chain_heartbeat(
+        env: Env,
+        owner: Address,
+        vault_id: u64,
+        gid_hash: BytesN<32>,
+        evm_owner: BytesN<20>,
+        relayer: Address,
+    ) {
+        owner.require_auth();
+        Self::bump_instance(&env);
+
+        let vault_key = DataKey::Vault(vault_id);
+        let vault: Vault = env
+            .storage()
+            .persistent()
+            .get(&vault_key)
+            .expect("Vault not found");
+        assert!(vault.creator == owner, "Only creator can bind heartbeat");
+        assert!(vault.is_active, "Vault not active");
+
+        let binding_key = DataKey::CrossChainHeartbeat(vault_id);
+        let binding = CrossChainHeartbeatBinding {
+            gid_hash,
+            evm_owner,
+            relayer,
+        };
+        env.storage().persistent().set(&binding_key, &binding);
+        Self::bump_persistent(&env, &binding_key);
+    }
+
+    /// Relay an EIP-191 signed Avalanche heartbeat into the Soroban vault.
+    pub fn sync_proof_of_life(
+        env: Env,
+        relayer: Address,
+        vault_id: u64,
+        evm_vault_id: u64,
+        gid_hash: BytesN<32>,
+        evm_owner: BytesN<20>,
+        timestamp: u64,
+        signature: BytesN<64>,
+        recovery_id: u32,
+    ) {
+        relayer.require_auth();
+        Self::bump_instance(&env);
+
+        let binding_key = DataKey::CrossChainHeartbeat(vault_id);
+        let binding: CrossChainHeartbeatBinding = env
+            .storage()
+            .persistent()
+            .get(&binding_key)
+            .expect("Cross-chain heartbeat not configured");
+        assert!(binding.relayer == relayer, "Unauthorized relayer");
+        assert!(binding.gid_hash == gid_hash, "Vault GID mismatch");
+        assert!(binding.evm_owner == evm_owner, "EVM owner mismatch");
+
+        let release_key = DataKey::ReleaseState(vault_id);
+        let mut state: VaultReleaseState = env
+            .storage()
+            .persistent()
+            .get(&release_key)
+            .expect("Vault state missing");
+        assert!(timestamp > state.last_proof_of_life, "Stale heartbeat");
+        assert!(timestamp <= env.ledger().timestamp().saturating_add(300), "Future heartbeat");
+
+        let mut payload = Bytes::new(&env);
+        payload.extend_from_slice(b"SpooVaultProofOfLife");
+        payload.extend_from_array(&gid_hash.to_array());
+        payload.extend_from_slice(&evm_vault_id.to_be_bytes());
+        payload.extend_from_array(&evm_owner.to_array());
+        payload.extend_from_slice(&timestamp.to_be_bytes());
+        let message_hash = env.crypto().keccak256(&payload);
+
+        let mut eth_input = Bytes::new(&env);
+        eth_input.extend_from_slice(b"\x19Ethereum Signed Message:\n32");
+        eth_input.extend_from_array(&message_hash.to_array());
+        let digest = env.crypto().keccak256(&eth_input);
+        let recovered: BytesN<65> = env
+            .crypto()
+            .secp256k1_recover(&digest, &signature, recovery_id);
+        let recovered_hash = env.crypto().keccak256(&Bytes::from(recovered));
+        let recovered_bytes: Bytes = recovered_hash.into();
+        let recovered_owner: BytesN<20> = recovered_bytes
+            .slice(12..32)
+            .try_into()
+            .expect("Invalid recovered owner");
+        assert!(recovered_owner == evm_owner, "Invalid heartbeat signature");
+
+        state.last_proof_of_life = timestamp;
+        env.storage().persistent().set(&release_key, &state);
+        Self::bump_persistent(&env, &release_key);
+        Self::bump_persistent(&env, &binding_key);
+
+        env.events().publish(
+            (Symbol::new(&env, "proof_life_synced"), vault_id),
+            (gid_hash, evm_owner, timestamp),
+        );
+    }
+
     /// Configure vault release conditions
     pub fn configure_vault_release(
         env: Env,
@@ -670,7 +1028,7 @@ impl SpooVaultStellar {
         assert!(vault.creator == owner, "Only creator can configure release");
         assert!(vault.is_active, "Vault not active");
         assert!(
-            inactivity_period >= 24 * 60 * 60 && inactivity_period <= 365 * 24 * 60 * 60,
+            (24 * 60 * 60..=365 * 24 * 60 * 60).contains(&inactivity_period),
             "Inactivity period must be between 1 and 365 days"
         );
 
@@ -736,6 +1094,158 @@ impl SpooVaultStellar {
         Self::bump_persistent(&env, &registry_key);
     }
 
+    /// Deactivate a vault, blocking all document and access operations
+    pub fn deactivate_vault(env: Env, owner: Address, vault_id: u64) {
+        owner.require_auth();
+        Self::bump_instance(&env);
+
+        let vault_key = DataKey::Vault(vault_id);
+        let mut vault: Vault = env
+            .storage()
+            .persistent()
+            .get(&vault_key)
+            .expect("Vault not found");
+        assert!(vault.creator == owner, "Only creator can deactivate vault");
+        assert!(vault.is_active, "Vault is already inactive");
+
+        vault.is_active = false;
+        env.storage().persistent().set(&vault_key, &vault);
+        Self::bump_persistent(&env, &vault_key);
+    }
+
+    /// Revoke a beneficiary's access to a document. Guardian-only, same-chain
+    /// counterpart to the EVM contract's `revokeAccess`.
+    pub fn revoke_access(env: Env, guardian: Address, document_id: u64, target: Address) {
+        guardian.require_auth();
+        Self::bump_instance(&env);
+
+        let doc_key = DataKey::Doc(document_id);
+        let doc: Document = env
+            .storage()
+            .persistent()
+            .get(&doc_key)
+            .expect("Document not found");
+
+        let is_guard: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IsGuardian(doc.vault_id, guardian))
+            .unwrap_or(false);
+        assert!(is_guard, "Only guardians can revoke access");
+
+        Self::apply_revocation(&env, document_id, &target);
+    }
+
+    /// Link this Soroban vault to its EVM counterpart so cross-chain
+    /// revocation broadcasts can be routed here: `vault_gid` is the globally
+    /// unique id the EVM contract derives via `vaultGID(vaultId)`, and
+    /// `evm_revoker` is the EVM address (typically an EVM-side guardian's
+    /// EOA) authorized to sign revocation broadcasts for this vault.
+    pub fn link_cross_chain_vault(
+        env: Env,
+        owner: Address,
+        vault_id: u64,
+        vault_gid: BytesN<32>,
+        evm_revoker: BytesN<20>,
+    ) {
+        owner.require_auth();
+        Self::bump_instance(&env);
+
+        let vault_key = DataKey::Vault(vault_id);
+        let vault: Vault = env
+            .storage()
+            .persistent()
+            .get(&vault_key)
+            .expect("Vault not found");
+        assert!(vault.creator == owner, "Only creator can link cross-chain vault");
+
+        let gid_key = DataKey::VaultGid(vault_gid);
+        assert!(
+            !env.storage().persistent().has(&gid_key),
+            "vault_gid already linked to a vault"
+        );
+        env.storage().persistent().set(&gid_key, &vault_id);
+        Self::bump_persistent(&env, &gid_key);
+
+        let revoker_key = DataKey::CrossChainRevoker(vault_id);
+        env.storage().persistent().set(&revoker_key, &evm_revoker);
+        Self::bump_persistent(&env, &revoker_key);
+    }
+
+    /// Apply an EVM-originated access revocation broadcast to this vault's
+    /// Soroban-side access grant, within the same Soroban ledger the call
+    /// lands in - closing the window where a beneficiary revoked on EVM
+    /// could still fetch document shares here.
+    ///
+    /// Trust model: the call is permissionless (anyone may relay it, like
+    /// forwarding any signed message), but it only takes effect if
+    /// `signature` recovers to the EVM address registered via
+    /// `link_cross_chain_vault` as this vault's authorized cross-chain
+    /// revoker. The signed digest commits to every argument below (including
+    /// `target_stellar_user`, resolved off-chain before the EVM guardian
+    /// signs), so a relayer cannot redirect a validly-signed message to a
+    /// different beneficiary or vault. `nonce` must strictly increase per
+    /// (vault_gid, document, beneficiary) triple, blocking replay - scoping
+    /// by `vault_gid` rather than just document/beneficiary means that if the
+    /// EVM contract is ever redeployed to a new address (and thus a new
+    /// `vaultGID`, since it is derived from `address(this)`) and re-linked,
+    /// nonce tracking starts fresh instead of being stuck behind whatever
+    /// nonce the previous deployment last used.
+    pub fn relay_revoke_access(
+        env: Env,
+        vault_gid: BytesN<32>,
+        document_id: u64,
+        target_evm_user: BytesN<20>,
+        target_stellar_user: Address,
+        nonce: u64,
+        signature: BytesN<64>,
+        recovery_id: u32,
+    ) {
+        Self::bump_instance(&env);
+
+        let vault_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultGid(vault_gid.clone()))
+            .expect("Unknown vault_gid");
+
+        let doc_key = DataKey::Doc(document_id);
+        let doc: Document = env
+            .storage()
+            .persistent()
+            .get(&doc_key)
+            .expect("Document not found");
+        assert!(doc.vault_id == vault_id, "Document does not belong to linked vault");
+
+        let nonce_key =
+            DataKey::RevocationNonce(vault_gid.clone(), document_id, target_stellar_user.clone());
+        let last_nonce: u64 = env.storage().persistent().get(&nonce_key).unwrap_or(0);
+        assert!(nonce > last_nonce, "Stale or replayed revocation nonce");
+
+        let revoker: BytesN<20> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CrossChainRevoker(vault_id))
+            .expect("No cross-chain revoker linked for this vault");
+
+        let recovered = Self::recover_eth_address(
+            &env,
+            &vault_gid,
+            document_id,
+            &target_evm_user,
+            &target_stellar_user,
+            nonce,
+            &signature,
+            recovery_id,
+        );
+        assert!(recovered == revoker, "Signature not from linked cross-chain revoker");
+
+        env.storage().persistent().set(&nonce_key, &nonce);
+        Self::bump_persistent(&env, &nonce_key);
+
+        Self::apply_revocation(&env, document_id, &target_stellar_user);
+    }
+
     /// Helper function to check if release condition is satisfied
     pub fn is_release_condition_satisfied(
         env: &Env,
@@ -760,7 +1270,7 @@ impl SpooVaultStellar {
             ReleaseCondition::LiveOnly => !is_dead,
             ReleaseCondition::EmergencyOnly => state.emergency_mode || is_dead,
             ReleaseCondition::PostDeathOnly => is_dead,
-            ReleaseCondition::Anytime => true,
+            _ => false,
         }
     }
 
@@ -847,6 +1357,59 @@ impl SpooVaultStellar {
         ]);
 
         let _: Val = env.invoke_contract(registry, &fn_name, args);
+    }
+
+    /// Clear a beneficiary's access grant for a document. Shared by the
+    /// guardian-initiated `revoke_access` and the cross-chain
+    /// `relay_revoke_access` so both paths apply the exact same effect.
+    fn apply_revocation(env: &Env, document_id: u64, target: &Address) {
+        let acc_key = DataKey::HasAccess(document_id, target.clone());
+        let lvl_key = DataKey::AccessLvl(document_id, target.clone());
+        env.storage().persistent().set(&acc_key, &false);
+        env.storage().persistent().remove(&lvl_key);
+        Self::bump_persistent(env, &acc_key);
+
+        env.events().publish(
+            (Symbol::new(env, "access_revoked"), document_id),
+            target.clone(),
+        );
+    }
+
+    /// Recover the EVM (Ethereum-style) address that produced `signature`
+    /// over the EIP-191-prefixed cross-chain revocation payload
+    /// `("RevokeAccess", vault_gid, document_id, target_evm_user,
+    /// target_stellar_user, nonce)`. `document_id` and `nonce` are packed as
+    /// 32-byte big-endian words to match Solidity's `abi.encodePacked` of a
+    /// `uint256`, and `target_stellar_user` is committed via its canonical
+    /// XDR encoding.
+    fn recover_eth_address(
+        env: &Env,
+        vault_gid: &BytesN<32>,
+        document_id: u64,
+        target_evm_user: &BytesN<20>,
+        target_stellar_user: &Address,
+        nonce: u64,
+        signature: &BytesN<64>,
+        recovery_id: u32,
+    ) -> BytesN<20> {
+        let mut payload = Bytes::from_slice(env, b"RevokeAccess");
+        payload.append(&Bytes::from(vault_gid.clone()));
+        payload.append(&Bytes::from_array(env, &u256_be(document_id)));
+        payload.append(&Bytes::from(target_evm_user.clone()));
+        payload.append(&target_stellar_user.clone().to_xdr(env));
+        payload.append(&Bytes::from_array(env, &u256_be(nonce)));
+
+        let message_hash = env.crypto().keccak256(&payload);
+
+        let mut prefixed = Bytes::from_slice(env, b"\x19Ethereum Signed Message:\n32");
+        prefixed.append(&Bytes::from(message_hash.to_bytes()));
+        let digest = env.crypto().keccak256(&prefixed);
+
+        let pubkey = env.crypto().secp256k1_recover(&digest, signature, recovery_id);
+        let pubkey_bytes: Bytes = pubkey.into();
+        let addr_hash = env.crypto().keccak256(&pubkey_bytes.slice(1..65));
+        let addr_bytes: Bytes = addr_hash.to_bytes().into();
+        BytesN::try_from(addr_bytes.slice(12..32)).unwrap()
     }
 
     // Helper functions for TTL management
