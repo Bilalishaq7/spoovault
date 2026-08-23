@@ -744,6 +744,56 @@ const executeSorobanCall = async (
   throw new Error("Transaction polling timed out");
 };
 
+const syncProofOfLife = async (
+  vaultId: number,
+  evmVaultId: number,
+  gidHash: string,
+  evmOwner: string,
+  timestamp: number,
+  signature: string,
+  recoveryId: number,
+  relayer?: string
+): Promise<void> => {
+  if (!activeAccount) throw new Error("Wallet not connected");
+  if (relayer && relayer !== activeAccount) {
+    throw new Error("Configured relayer does not match the connected Stellar account");
+  }
+  if (!isConfigured()) {
+    throw new Error("Stellar contract is not configured for heartbeat relay");
+  }
+
+  await executeSorobanCall("sync_proof_of_life", [
+    activeAccount,
+    vaultId,
+    evmVaultId,
+    hexToBytes(gidHash),
+    hexToBytes(evmOwner),
+    timestamp,
+    hexToBytes(signature),
+    recoveryId,
+  ]);
+};
+
+const bindCrossChainHeartbeat = async (
+  vaultId: number,
+  gidHash: string,
+  evmOwner: string,
+  relayer: string
+): Promise<void> => {
+  if (!activeAccount) throw new Error("Wallet not connected");
+  if (!isConfigured()) {
+    throw new Error("Stellar contract is not configured for heartbeat binding");
+  }
+
+  await executeSorobanCall("bind_cross_chain_heartbeat", [
+    activeAccount,
+    vaultId,
+    hexToBytes(gidHash),
+    hexToBytes(evmOwner),
+    relayer,
+  ]);
+};
+
 const createVault = async (
   name: string,
   description: string,
@@ -1444,6 +1494,8 @@ export const stellarService = {
   signIdentityBindingWithMetaMask,
   signIdentityBindingWithFreighter,
   bindIdentity,
+  syncProofOfLife,
+  bindCrossChainHeartbeat,
   getIdentityRegistryContractId,
   isConfigured,
   setMockStellarSdk,

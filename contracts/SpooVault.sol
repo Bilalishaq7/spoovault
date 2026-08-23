@@ -3,7 +3,9 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 import "./ISpooVault.sol";
+import "./IERC6551Registry.sol";
 
 /**
  * @title SpooVault
@@ -13,10 +15,14 @@ import "./ISpooVault.sol";
  *      interface.
  */
 contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
+    using Strings for uint256;
     uint256 private _tokenIdCounter;
     uint256 private _vaultIdCounter;
     uint256 private _documentIdCounter;
     uint256 private _requestIdCounter;
+
+    address public erc6551Registry;
+    address public tbaImplementation;
 
     enum RequestStatus {
         PENDING,
@@ -169,6 +175,17 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     // Access versions let us invalidate all prior document grants for a user+vault in O(1).
     mapping(uint256 => mapping(address => uint256)) private _vaultAccessVersion;
     mapping(uint256 => mapping(address => uint256)) private _documentAccessVersion;
+
+    // Strictly-increasing per (documentId, user) nonce for cross-chain revocation
+    // broadcasts. Lets a relayed message be replay-protected on the receiving
+    // chain independent of any chain-specific block/ledger sequencing.
+    mapping(uint256 => mapping(address => uint256)) public documentRevocationNonce;
+
+    // Opt-in per vault: most vaults are single-chain and should not pay the
+    // extra SSTORE/event gas cost of cross-chain revocation broadcasting on
+    // every revokeAccess call. Only vaults linked to a Soroban counterpart
+    // (via link_cross_chain_vault) need this enabled.
+    mapping(uint256 => bool) public crossChainRevocationEnabled;
     mapping(uint256 => VaultReleaseState) private _vaultReleaseStates;
 
     // Guardian rotation and threshold adjustment governance
@@ -187,8 +204,16 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     event NFTMinted(uint256 indexed tokenId, address indexed to, uint256 indexed vaultId);
     event NFTBurned(uint256 indexed tokenId);
     event AccessRevoked(uint256 indexed documentId, address indexed user);
+    event CrossChainRevocationBroadcast(
+        bytes32 indexed vaultGID, uint256 indexed documentId, address indexed targetUser, uint256 nonce
+    );
     event VaultReleaseConfigured(uint256 indexed vaultId, uint256 inactivityPeriod);
-    event ProofOfLifeRecorded(uint256 indexed vaultId, address indexed owner, uint256 timestamp);
+    event ProofOfLifeRecorded(
+        uint256 indexed vaultId,
+        address indexed owner,
+        uint256 timestamp,
+        string vaultGid
+    );
     event EmergencyModeUpdated(uint256 indexed vaultId, bool enabled);
     event DocumentReleaseConditionSet(uint256 indexed documentId, ReleaseCondition condition);
     event PublicKeyRegistered(address indexed user, string publicKey);
@@ -224,6 +249,32 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     }
 
     constructor() ERC721("SpooVault Access Token", "SPVT") {}
+
+    /**
+     * @dev Initialize ERC-6551 Token Bound Account support.
+     * Can only be called once to set the registry and implementation addresses.
+     */
+    function initializeERC6551(address registry, address implementation) external {
+        if (erc6551Registry != address(0)) revert("ERC6551 already initialized");
+        erc6551Registry = registry;
+        tbaImplementation = implementation;
+    }
+
+    /**
+     * @dev Computes the deterministic Token Bound Account address for a given vault NFT.
+     */
+    function computeVaultAccount(uint256 tokenId) external view returns (address) {
+        if (erc6551Registry == address(0) || tbaImplementation == address(0)) {
+            revert("ERC6551 not initialized");
+        }
+        return IERC6551Registry(erc6551Registry).account(
+            tbaImplementation,
+            block.chainid,
+            address(this),
+            tokenId,
+            0
+        );
+    }
 
     /**
      * @dev Create a new vault with guardian invites.
@@ -437,7 +488,18 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
 
         _vaultReleaseStates[vaultId].lastProofOfLife = block.timestamp;
         _vaultReleaseStates[vaultId].lastProofOfLifeBlock = block.number;
-        emit ProofOfLifeRecorded(vaultId, msg.sender, block.timestamp);
+        emit ProofOfLifeRecorded(vaultId, msg.sender, block.timestamp, getVaultGID(vaultId));
+    }
+
+    /// @notice Returns the stable cross-chain identifier for an EVM vault.
+    function getVaultGID(uint256 vaultId) public view returns (string memory) {
+        return string.concat(
+            block.chainid.toString(),
+            ":",
+            Strings.toHexString(address(this)),
+            ":",
+            vaultId.toString()
+        );
     }
 
     /**
@@ -802,7 +864,15 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     }
 
     /**
-     * @dev Revoke access from user for a specific document.
+     * @dev Revoke access from user for a specific document. If the vault has
+     *      opted into cross-chain revocation via `setCrossChainRevocationEnabled`,
+     *      also emits a broadcast payload (vaultGID, documentId, targetUser,
+     *      nonce) that a relayer can have the calling guardian sign and
+     *      forward to the linked Soroban vault via `relay_revoke_access`,
+     *      closing the window where a still-cached Stellar-side grant could
+     *      be used after this EVM-side revocation. Disabled by default so
+     *      single-chain vaults don't pay for broadcast infrastructure they
+     *      never use.
      */
     function revokeAccess(uint256 documentId, address user) external nonReentrant {
         if (documents[documentId].id == 0) revert DocumentNotExist();
@@ -815,6 +885,31 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         delete _documentAccessVersion[documentId][user];
 
         emit AccessRevoked(documentId, user);
+
+        if (crossChainRevocationEnabled[vaultId]) {
+            uint256 nonce = ++documentRevocationNonce[documentId][user];
+            emit CrossChainRevocationBroadcast(vaultGID(vaultId), documentId, user, nonce);
+        }
+    }
+
+    /// @notice Globally-unique cross-chain identifier for a vault, derived from
+    ///         this contract's address and the local vault id. A Soroban vault
+    ///         links itself to this id via `link_cross_chain_vault` so relayed
+    ///         revocation broadcasts can be routed to the right vault.
+    function vaultGID(uint256 vaultId) public view returns (bytes32) {
+        return keccak256(abi.encodePacked(address(this), vaultId));
+    }
+
+    /// @notice Opt a vault into (or out of) cross-chain revocation broadcasting.
+    ///         Only the vault creator may toggle this; leave disabled (the
+    ///         default) for vaults with no linked Soroban counterpart so
+    ///         `revokeAccess` doesn't pay for broadcast infrastructure they
+    ///         never use.
+    function setCrossChainRevocationEnabled(uint256 vaultId, bool enabled) external nonReentrant {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
+
+        crossChainRevocationEnabled[vaultId] = enabled;
     }
 
     /**
