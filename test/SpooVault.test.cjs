@@ -287,7 +287,6 @@ describe("SpooVault EVM Contract Unit Tests", function () {
         .to.emit(spooVault, "CrossChainRevocationBroadcast")
         .withArgs(gid, 1, userA.address, 2);
       expect(await spooVault.documentRevocationNonce(1, userA.address)).to.equal(2);
->>>>>>> main
     });
   });
 });

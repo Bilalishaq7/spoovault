@@ -182,7 +182,6 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard, EIP712 {
     error ZeroShareAlreadySubmitted();
     error InvalidShareRefreshInput();
     error InvalidReshareDuration();
->>>>>>> main
 
     mapping(uint256 => Vault) public vaults;
     mapping(uint256 => Document) public documents;

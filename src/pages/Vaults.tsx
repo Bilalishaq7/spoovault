@@ -41,7 +41,7 @@ import {
   VaultData,
   VaultReleaseState,
 } from "../services/contract.service";
-import { shortenAddress, isValidMultiChainAddress, formatDate, getVaultGID, buildVaultDocumentCounts, keyRecordByVaultGID } from "../utils/helpers";
+import { shortenAddress, isValidAddress, isValidMultiChainAddress, formatDate, getVaultGID, buildVaultDocumentCounts, keyRecordByVaultGID } from "../utils/helpers";
 import { identityService } from "../services/identity.service";
 import { toast } from "react-hot-toast";
 import { buttonClasses } from "../utils/buttonClasses";
