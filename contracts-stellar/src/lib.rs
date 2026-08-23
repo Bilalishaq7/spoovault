@@ -125,7 +125,15 @@ pub struct VaultReleaseState {
     pub emergency_mode: bool,
     pub inactivity_period: u64,
     pub last_proof_of_life: u64,
+    pub last_proof_of_life_sequence: u32,
 }
+
+/// Minimum number of ledgers that must close since the last proof of life
+/// before post-death conditions can unlock, in addition to the timestamp
+/// threshold. Guards against validators nudging the ledger timestamp within
+/// their permitted drift window to trigger an early release without real
+/// ledger progression having occurred.
+const MIN_POST_DEATH_SEQUENCE_DELTA: u32 = 256;
 
 /// A Web3 Keeper (Chainlink Automation / Gelato) delegation: `keeper` may relay
 /// proof-of-life heartbeats on the vault creator's behalf until `expires_at`.
@@ -462,7 +470,7 @@ impl SpooVaultStellar {
         user.require_auth();
         Self::bump_instance(&env);
 
-        assert!(new_public_key.len() > 0, "New public key is required");
+        assert!(!new_public_key.is_empty(), "New public key is required");
         assert!(
             old_public_key != new_public_key,
             "New key must differ from old key"
@@ -690,6 +698,7 @@ impl SpooVaultStellar {
             emergency_mode: false,
             inactivity_period: 30 * 24 * 60 * 60, // 30 days in seconds
             last_proof_of_life: env.ledger().timestamp(),
+            last_proof_of_life_sequence: env.ledger().sequence(),
         };
         let release_key = DataKey::ReleaseState(next_vault_id);
         env.storage().persistent().set(&release_key, &release_state);
@@ -1044,6 +1053,7 @@ impl SpooVaultStellar {
         let rel_key = DataKey::ReleaseState(vault_id);
         let mut state: VaultReleaseState = env.storage().persistent().get(&rel_key).unwrap();
         state.last_proof_of_life = env.ledger().timestamp();
+        state.last_proof_of_life_sequence = env.ledger().sequence();
         env.storage().persistent().set(&rel_key, &state);
 
         Self::bump_persistent(&env, &vault_key);
@@ -1159,6 +1169,7 @@ impl SpooVaultStellar {
         let rel_key = DataKey::ReleaseState(vault_id);
         let mut state: VaultReleaseState = env.storage().persistent().get(&rel_key).unwrap();
         state.last_proof_of_life = env.ledger().timestamp();
+        state.last_proof_of_life_sequence = env.ledger().sequence();
         env.storage().persistent().set(&rel_key, &state);
 
         Self::bump_persistent(&env, &vault_key);
@@ -1255,6 +1266,7 @@ impl SpooVaultStellar {
         assert!(recovered_owner == evm_owner, "Invalid heartbeat signature");
 
         state.last_proof_of_life = timestamp;
+        state.last_proof_of_life_sequence = env.ledger().sequence();
         env.storage().persistent().set(&release_key, &state);
         Self::bump_persistent(&env, &release_key);
         Self::bump_persistent(&env, &binding_key);
@@ -1515,8 +1527,11 @@ impl SpooVaultStellar {
             .expect("Vault state missing");
         Self::bump_persistent(env, &rel_key);
 
-        let is_dead =
+        let timestamp_expired =
             env.ledger().timestamp() >= state.last_proof_of_life + state.inactivity_period;
+        let sequence_elapsed = env.ledger().sequence()
+            >= state.last_proof_of_life_sequence + MIN_POST_DEATH_SEQUENCE_DELTA;
+        let is_dead = timestamp_expired && sequence_elapsed;
 
         match condition {
             ReleaseCondition::LiveOnly => !is_dead,

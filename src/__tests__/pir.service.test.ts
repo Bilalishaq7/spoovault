@@ -3,8 +3,9 @@
  * @description Integration tests for PIR (Private Information Retrieval) service.
  */
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { PirService, DummyQueryBatcher, HomomorphicHash } from "../services/pir.service";
+import { ipfsGateway } from "../services/ipfsGateway";
 
 describe("HomomorphicHash", () => {
   let homomorphicHash: HomomorphicHash;
@@ -209,48 +210,42 @@ describe("PirService", () => {
   describe("fetchDocument with PIR disabled", () => {
     beforeEach(() => {
       pirService.updateConfig({ enabled: false });
+      vi.spyOn(ipfsGateway, "fetchFile").mockRejectedValue(new Error("network unavailable"));
+      vi.spyOn(ipfsGateway, "getURL").mockReturnValue("https://test.com/ipfs/QmTest123456789");
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
     });
 
     it("should use standard fetch when PIR is disabled", async () => {
       const cid = "QmTest123456789";
-      
-      // Mock the ipfsGateway.fetchFile
-      const mockResponse = new Response("test data", { status: 200 });
-      vi.mock("../services/ipfsGateway", () => ({
-        ipfsGateway: {
-          fetchFile: vi.fn().mockResolvedValue(mockResponse),
-          getURL: vi.fn().mockReturnValue("https://test.com/ipfs/QmTest123456789"),
-        },
-      }));
 
-      // This test would require mocking the ipfsGateway module
-      // For now, we'll just test the structure
       const result = await pirService.fetchDocument(cid);
 
-      expect(result.success).toBe(false); // Will fail without proper mock
+      expect(result.success).toBe(false); // fetchFile rejects, caught and reported
       expect(result.proxied).toBe(false);
       expect(result.dummyQueriesIssued).toBe(0);
     });
   });
 
   describe("fetchDocument with PIR enabled", () => {
+    beforeEach(() => {
+      vi.spyOn(ipfsGateway, "getURL").mockReturnValue("https://test.com/ipfs/QmTest123456789");
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network unavailable")));
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+
     it("should execute PIR fetch when enabled", async () => {
       const cid = "QmTest123456789";
-      
-      // Mock the ipfsGateway
-      const mockResponse = new Response("test data", { status: 200 });
-      vi.mock("../services/ipfsGateway", () => ({
-        ipfsGateway: {
-          fetchFile: vi.fn().mockResolvedValue(mockResponse),
-          getURL: vi.fn().mockReturnValue("https://test.com/ipfs/QmTest123456789"),
-        },
-      }));
 
-      // This test would require proper mocking
-      // For now, we'll test the structure
       const result = await pirService.fetchDocument(cid);
 
-      expect(result.success).toBe(false); // Will fail without proper mock
+      expect(result.success).toBe(false); // no real gateway reachable in this environment
       expect(result.dummyQueriesIssued).toBeGreaterThanOrEqual(0);
     });
   });
