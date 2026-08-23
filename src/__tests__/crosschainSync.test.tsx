@@ -8,6 +8,25 @@ vi.mock("../context/Web3Context", () => ({
   useWeb3: vi.fn(),
 }));
 
+vi.mock("../services/contract.service", () => ({
+  contractService: {
+    initialize: vi.fn(),
+    getVaultsByCreator: vi.fn().mockResolvedValue([]),
+    getDocumentsByVault: vi.fn().mockResolvedValue([]),
+    getPendingRequestsForUser: vi.fn().mockResolvedValue([]),
+    getApprovalThreshold: vi.fn().mockResolvedValue(1),
+    isGuardianOf: vi.fn().mockResolvedValue(false),
+  },
+}));
+
+vi.mock("../services/stellar.service", () => ({
+  stellarContractService: {
+    initialize: vi.fn(),
+    getVaultsByCreator: vi.fn().mockResolvedValue([]),
+    getDocumentsByVault: vi.fn().mockResolvedValue([]),
+  },
+}));
+
 // Mock heroui components
 vi.mock("@heroui/react", () => ({
   Card: ({ children }: any) => <div>{children}</div>,
