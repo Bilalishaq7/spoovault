@@ -1,15 +1,11 @@
 use super::*;
-<<<<<<< HEAD
-use soroban_sdk::{testutils::{Address as _, Ledger as _}, vec, Address, Env, String};
-=======
 use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
     contract, contracterror, contractimpl,
     crypto::Hash,
-    testutils::Address as _,
+    testutils::{Address as _, Ledger as _},
     vec, Address, Env, IntoVal, String, Symbol, Val, Vec,
 };
->>>>>>> main
 
 /// Minimal custom account contract standing in for a Soroban account
 /// abstraction signer (e.g. a multisig or policy-gated wallet). Its
@@ -352,17 +348,12 @@ fn test_prove_life_and_emergency_mode() {
 }
 
 #[test]
-<<<<<<< HEAD
 fn test_authorize_keeper_and_relay_heartbeat() {
-=======
-fn test_contract_account_guardian_approves_via_custom_auth() {
->>>>>>> main
     let env = Env::default();
     let contract_id = env.register_contract(None, SpooVaultStellar);
     let client = SpooVaultStellarClient::new(&env, &contract_id);
 
     let creator = Address::generate(&env);
-<<<<<<< HEAD
     let g1 = Address::generate(&env);
     let keeper = Address::generate(&env);
     env.mock_all_auths();
@@ -393,22 +384,13 @@ fn test_contract_account_guardian_approves_via_custom_auth() {
     client.prove_life_by_keeper(&keeper, &vault_id);
 }
 
-// Negative paths are asserted via the generated `try_*` client methods rather than
-// `#[should_panic]`: a contract-side `assert!`/panic is caught by the Soroban host at
-// the client-invocation boundary and surfaced as an `Err`, not as a Rust panic that
-// unwinds into the test thread — calling the panicking method directly here would abort
-// the test process instead of failing the assertion.
-
 #[test]
-fn test_prove_life_by_keeper_fails_when_unauthorized() {
+fn test_contract_account_guardian_approves_via_custom_auth() {
     let env = Env::default();
     let contract_id = env.register_contract(None, SpooVaultStellar);
     let client = SpooVaultStellarClient::new(&env, &contract_id);
 
     let creator = Address::generate(&env);
-    let g1 = Address::generate(&env);
-    let keeper = Address::generate(&env);
-=======
     // A deployed contract acting as a guardian - a custom account abstraction
     // signer, not a raw Stellar keypair.
     let aa_guardian = env.register_contract(None, MockAaAccount);
@@ -1380,5 +1362,4 @@ mod upgrade_governance {
         client.migrate(&admin);
         client.migrate(&admin);
     }
->>>>>>> main
 }

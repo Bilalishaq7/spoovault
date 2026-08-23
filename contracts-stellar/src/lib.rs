@@ -4,14 +4,10 @@
 // Public contract entrypoints intentionally take many args (env + auth + payload).
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
-<<<<<<< HEAD
-    contract, contracterror, contractimpl, contracttype, Address, Env, String, Vec,
-=======
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contracterror, contractimpl, contracttype, panic_with_error,
     xdr::ToXdr,
     Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
->>>>>>> main
 };
 
 /// Zero-pads a `u64` into a 32-byte big-endian word, matching how Solidity's
