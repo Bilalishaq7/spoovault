@@ -21,13 +21,17 @@ jobs:
       - name: Install dependencies (for OpenZeppelin imports)
         run: npm install --legacy-peer-deps
 
+      # The echidna image ships solc-select but starts with no version
+      # selected, so plain `echidna-test` fails before it ever reads the
+      # harness ("No solc version set"). Select the same solc version the
+      # rest of the repo builds with (hardhat.config.cjs) before fuzzing.
       - name: Run Echidna campaign
-        continue-on-error: true
         run: |
           docker run --rm \
             -v "$PWD":/src -w /src \
+            --entrypoint bash \
             trailofbits/echidna:v2.2.3 \
-            sh -c "python -m pip install --quiet --upgrade solc-select 2>/dev/null; solc-select install 0.8.24 && solc-select use 0.8.24 && echidna /src/fuzz/harness/SpooVaultFuzz.sol --contract SpooVaultFuzz --config /src/fuzz/echidna/config.yaml --test-mode property"
+            -c "solc-select install 0.8.24 && solc-select use 0.8.24 && echidna-test /src/fuzz/harness/SpooVaultFuzz.sol --contract SpooVaultFuzz --config /src/fuzz/echidna/config.yaml --test-mode property"
 
   medusa:
     name: Medusa (Solidity invariant fuzzing)
@@ -41,26 +45,32 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Install Medusa (build from source, v0.1.8)
-        continue-on-error: true
-        # `go install pkg@version` refuses modules that carry `replace`
-        # directives (medusa v0.1.8 replaces go-ethereum with medusa-geth),
-        # so we clone the tagged source and build it directly. The `main`
-        # package lives at the repo root (not ./cmd/medusa).
-        run: |
-          git clone --depth 1 --branch v0.1.8 https://github.com/crytic/medusa /tmp/medusa
-          cd /tmp/medusa
-          go build -o /usr/local/bin/medusa .
-          medusa --version
+      - name: Install Medusa
+        run: go install github.com/crytic/medusa@latest
 
       - name: Install dependencies (for OpenZeppelin imports)
         run: npm install --legacy-peer-deps
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Medusa shells out to crytic-compile (a Python tool, not a Go one) to
+      # compile the Solidity harness, and crytic-compile itself resolves solc
+      # through solc-select. Neither is installed by default, so without this
+      # step medusa fails immediately with "crytic-compile: executable file
+      # not found in $PATH".
+      - name: Install crytic-compile
+        run: |
+          pip install --upgrade pip crytic-compile solc-select
+          solc-select install 0.8.24
+          solc-select use 0.8.24
+
       - name: Run Medusa campaign
-        continue-on-error: true
         run: |
           export PATH="$HOME/go/bin:$PATH"
-          medusa fuzz --config fuzz/medusa/medusa.toml
+          medusa fuzz --config fuzz/medusa/medusa.json
 
   soroban-fuzz:
     name: Soroban proptest (cargo-fuzz / proptest)
@@ -73,6 +83,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -81,7 +92,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contracts-stellar/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts-stellar/Cargo.lock') }}
+            contracts-stellar/upgrade_fixture/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts-stellar/Cargo.lock', 'contracts-stellar/upgrade_fixture/Cargo.toml') }}
+
+      # The upgrade_contract integration test imports this fixture's
+      # compiled Wasm at compile time via `contractimport!`, so it must
+      # exist before `cargo test` on the main crate below.
+      - name: Build upgrade_fixture Wasm
+        working-directory: contracts-stellar/upgrade_fixture
+        run: cargo build --release --target wasm32-unknown-unknown
 
       - name: Format (Soroban crate)
         working-directory: contracts-stellar
