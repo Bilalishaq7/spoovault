@@ -77,7 +77,90 @@ Callers use `ipfsService.fetchFile` / `fetchFromIPFS` (Documents, Access Center,
 
 ---
 
-## 5. Read-Call Caching
+## 5. Private Information Retrieval (PIR)
+
+To prevent IPFS gateway surveillance (where gateways log requester IP addresses and requested CIDs, allowing correlation of beneficiary identities with specific vault documents), SpooVault implements Private Information Retrieval (PIR) principles:
+
+### PIR Components (`src/services/pir.service.ts`)
+
+1. **HomomorphicHash**: Generates deterministic but non-reversible CID identifiers using SHA-256 with per-session salt. Same CID produces same hash within a session, but different sessions produce different hashes, preventing gateway operators from identifying specific documents from logged hashes.
+
+2. **DummyQueryBatcher**: Generates dummy IPFS queries that look like real CIDs (CIDv0 format) and batches real queries with dummy queries to obscure which document is being fetched. The batch is shuffled to prevent position-based analysis. Configurable dummy query count (default: 5) and batch delay (default: 100ms).
+
+3. **TorProxyClient**: SOCKS5 proxy client for routing IPFS requests through Tor, providing IP address anonymity when fetching documents. Requires local Tor daemon with SOCKS5 proxy enabled (default: 127.0.0.1:9050). Falls back to standard fetch if Tor is unavailable.
+
+### PIR Integration
+
+The PIR service integrates with the existing IPFS gateway infrastructure:
+- `ipfsService.fetchFileWithPIR()`: New method that uses PIR for document fetches
+- Falls back to standard `ipfsGateway.fetchFile()` if PIR is disabled
+- Maintains compatibility with existing multi-gateway circuit breaker
+- Works with existing gateway pool and health scoring system
+
+### Configuration
+
+PIR is configured via environment variables (see `.env.example`):
+- `VITE_PIR_ENABLED`: Enable PIR to obscure which documents are being fetched
+- `VITE_PIR_USE_TOR`: Use Tor SOCKS5 proxy for IPFS fetches
+- `VITE_PIR_TOR_HOST`: Tor SOCKS5 proxy host (default: 127.0.0.1)
+- `VITE_PIR_TOR_PORT`: Tor SOCKS5 proxy port (default: 9050)
+- `VITE_PIR_DUMMY_COUNT`: Number of dummy queries to batch with real queries (default: 5)
+- `VITE_PIR_BATCH_DELAY`: Delay between dummy queries in milliseconds (default: 100)
+
+### Security Properties
+
+- **Oblivious Gateway Querying**: Real queries are batched with dummy queries, making it statistically difficult for gateways to identify which query corresponds to the actual document
+- **Mixnet Proxy Routing**: When enabled, all IPFS requests are routed through Tor's SOCKS5 proxy for IP address anonymity
+- **Encrypted CID Index**: CIDs are hashed with session-specific salts before logging, making hashes non-reversible
+
+See `docs/PIR_ARCHITECTURE.md` for detailed PIR architecture and usage documentation.
+
+---
+
+## 7. Soroban Event Indexer
+
+To address the latency and RPC payload overhead from polling Soroban RPC `getEvents`, SpooVault implements a high-performance event indexing system:
+
+### Event Indexer Components (`src/services/sorobanEventIndexer.service.ts`)
+
+1. **SorobanEventIndexer**: Main indexer with RPC polling and WebSocket relay integration. Implements exponential backoff reconnection for RPC connection drops and configurable polling intervals.
+
+2. **EventStore**: Enhanced IndexedDB persistence with topic-based indexing for efficient queries. Stores events, maintains topic indexes, and persists cursors for resumable polling.
+
+3. **WebSocket Gateway** (`scripts/soroban-event-gateway.mjs`): Node.js WebSocket server for real-time event broadcasting to frontend clients. Supports multi-contract monitoring with independent polling and health check endpoints.
+
+### Event Indexer Integration
+
+The event indexer integrates with the Web3Context for Stellar ecosystem:
+- Automatically starts when connecting to Stellar in Web3Context
+- Subscribes to contract events (VaultCreated, GuardianAdded, AccessRequested)
+- Broadcasts events to subscribers via WebSocket relay when configured
+- Provides statistics API for monitoring indexer health
+
+### Configuration
+
+Event indexer is configured via environment variables (see `.env.example`):
+- `VITE_SOROBAN_EVENT_RELAY_URL`: WebSocket relay URL for real-time event broadcasting
+- Gateway server configuration: `SOROBAN_RPC_URL`, `SOROBAN_CONTRACT_IDS`, `WS_PORT`, `POLL_INTERVAL_MS`, etc.
+
+### Performance Characteristics
+
+- **Frontend UI updates**: <500ms upon contract event emission (when using WebSocket relay)
+- **RPC polling**: 250ms default interval (configurable)
+- **IndexedDB queries**: <10ms for topic-based queries
+- **Exponential backoff**: 500ms initial delay, 30s maximum, 2x backoff factor
+
+### Security Properties
+
+- **WebSocket Security**: Supports wss:// for production deployments
+- **RPC Security**: Uses HTTPS endpoints, validates contract IDs
+- **Data Privacy**: IndexedDB data stored locally, no sensitive data transmitted
+
+See `docs/SOROBAN_EVENT_INDEXER.md` for detailed event indexer architecture and usage documentation.
+
+---
+
+## 8. Read-Call Caching
 
 `contract.service.ts` caches the results of read-only view calls (`hasActiveAccess`, `getVault`) for a 10-second TTL, keyed by their arguments (document/vault/user), with concurrent duplicate calls deduped into a single underlying request. This avoids re-issuing the same RPC call on every page navigation or component remount. Write actions that change cached state (e.g. `approveAccess`, `acceptGuardianInvite`, `burnAccessToken`) invalidate the relevant cache entries immediately, and `contractService.clear()` resets the cache on wallet disconnect. See `src/utils/ttlCache.ts` for the generic cache implementation.
 
@@ -85,15 +168,27 @@ The Stellar/Soroban path currently has no real RPC calls (reads are `localStorag
 
 ---
 
-## 6. Windowed List Rendering (Document & Access Pass Lists)
+## 6. Windowed List Rendering (Document, Access Pass & Audit Log Lists)
 
-`Documents.tsx` and `NFTGallery.tsx` render potentially large lists (uploaded documents, minted access passes) that previously mounted every item to the DOM unconditionally, causing scroll jank as a vault's item count grows.
+`Documents.tsx`, `NFTGallery.tsx`, and `AuditLogTimeline.tsx` render potentially large lists (uploaded documents, minted access passes, vault activity events) that previously mounted every item to the DOM unconditionally, causing scroll jank as a vault's item/event count grows.
 
-Both pages now delegate their list rendering to a dedicated, presentational component that windows the DOM using [`@tanstack/react-virtual`](https://tanstack.com/virtual/latest):
+These components window the DOM using [`@tanstack/react-virtual`](https://tanstack.com/virtual/latest):
 
 - `src/components/documents/VirtualizedDocumentsList.tsx` — windows the document table body. The table markup itself is a CSS-grid of `role="table"/"row"/"cell"` divs rather than a native `<table>`, because native table rows can't be absolutely positioned for windowing without breaking column alignment (see decision rationale in PR #45).
 - `src/components/nft/VirtualizedNftGrid.tsx` — windows the access-pass card grid by chunking tokens into rows matching the current responsive column count (1/2/3 columns) and virtualizing rows of cards.
+- `src/components/audit/AuditLogTimeline.tsx` — windows the vault activity timeline directly (it's already a presentational, props-driven list component, so no separate `Virtualized*` wrapper was needed). The timeline's connecting rail (`before:*` pseudo-element) is drawn against the virtualizer's total scroll height rather than natural content flow, so it still spans the full list once scrolled.
 
-Both components use `useVirtualizer`'s `measureElement` for dynamic per-row sizing (rather than a single fixed row height), since row/card content height varies with wrapped text and action-button counts. Only rows within the viewport plus a small overscan are ever mounted to the DOM, regardless of total list length.
+All three components use `useVirtualizer`'s `measureElement` for dynamic per-row sizing (rather than a single fixed row height), since row/card content height varies with wrapped text and action-button counts. Only rows within the viewport plus a small overscan are ever mounted to the DOM, regardless of total list length — verified in `src/__tests__/VirtualizedDocumentsList.test.tsx`, `VirtualizedNftGrid.test.tsx`, and `AuditLogTimeline.test.tsx` with lists up to 10,000 items, asserting the mounted node count stays under 50.
 
-`@tanstack/react-virtual` was already present in `package-lock.json` as a transitive dependency of `@heroui/react`'s internal `Table`/`Listbox` virtualization (HeroUI's own `<Table isVirtualized>` uses it internally) — it is now also a direct dependency, pinned to the same locked version, since both pages call it directly.
+`@tanstack/react-virtual` was already present in `package-lock.json` as a transitive dependency of `@heroui/react`'s internal `Table`/`Listbox` virtualization (HeroUI's own `<Table isVirtualized>` uses it internally) — it is now also a direct dependency, pinned to the same locked version, since all three call it directly.
+
+---
+
+## 7. Emergency-Mode Beneficiary Notifications (Push Protocol / EPNS)
+
+Beneficiaries are notified via a push notification when a vault's Emergency Mode is toggled (Avalanche path only; Stellar emergency-mode support is not wired into the frontend today).
+
+- Each vault stores a single beneficiary wallet address (`SpooVault.sol`'s `_vaultBeneficiary` mapping, set once via `setBeneficiary` at vault-creation time and never editable afterward). There is no on-chain concept of "beneficiary" prior to this — `creator` and `guardians[]` were the only stored roles.
+- After a successful `setEmergencyMode` transaction, `Vaults.tsx` resolves the vault's beneficiary with `contractService.getBeneficiary` and calls `pushNotificationService.notifyEmergencyModeChange`, which is a soft-fail: a notification error is logged but never blocks or rolls back the on-chain toggle.
+- Sending the actual notification requires signing with a Push Protocol channel (or delegate) private key. That key must never reach the browser bundle, so notifications route through a new serverless proxy, `scripts/push-notification-proxy.mjs`, mirroring the existing `scripts/pinata-proxy.mjs` pattern: same HMAC request signing (`scripts/lib/ipfsProxyGuard.mjs`, `VITE_SPOOVUALT_PROXY_SECRET`), same CORS/origin allowlist, private key held only in the proxy's `PUSH_CHANNEL_PRIVATE_KEY` env var.
+- This requires a Push Protocol channel to already be provisioned (one-time on-chain setup: 50 $PUSH + gas — see [Push's channel creation guide](https://comms.push.org/docs/notifications/tutorials/create-your-channel/)) before notifications can actually be sent. Without `VITE_PUSH_NOTIFICATION_PROXY_URL` configured, `pushNotificationService` is a no-op.
