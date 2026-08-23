@@ -168,15 +168,16 @@ The Stellar/Soroban path currently has no real RPC calls (reads are `localStorag
 
 ---
 
-## 9. Windowed List Rendering (Document & Access Pass Lists)
+## 6. Windowed List Rendering (Document, Access Pass & Audit Log Lists)
 
-`Documents.tsx` and `NFTGallery.tsx` render potentially large lists (uploaded documents, minted access passes) that previously mounted every item to the DOM unconditionally, causing scroll jank as a vault's item count grows.
+`Documents.tsx`, `NFTGallery.tsx`, and `AuditLogTimeline.tsx` render potentially large lists (uploaded documents, minted access passes, vault activity events) that previously mounted every item to the DOM unconditionally, causing scroll jank as a vault's item/event count grows.
 
-Both pages now delegate their list rendering to a dedicated, presentational component that windows the DOM using [`@tanstack/react-virtual`](https://tanstack.com/virtual/latest):
+These components window the DOM using [`@tanstack/react-virtual`](https://tanstack.com/virtual/latest):
 
 - `src/components/documents/VirtualizedDocumentsList.tsx` — windows the document table body. The table markup itself is a CSS-grid of `role="table"/"row"/"cell"` divs rather than a native `<table>`, because native table rows can't be absolutely positioned for windowing without breaking column alignment (see decision rationale in PR #45).
 - `src/components/nft/VirtualizedNftGrid.tsx` — windows the access-pass card grid by chunking tokens into rows matching the current responsive column count (1/2/3 columns) and virtualizing rows of cards.
+- `src/components/audit/AuditLogTimeline.tsx` — windows the vault activity timeline directly (it's already a presentational, props-driven list component, so no separate `Virtualized*` wrapper was needed). The timeline's connecting rail (`before:*` pseudo-element) is drawn against the virtualizer's total scroll height rather than natural content flow, so it still spans the full list once scrolled.
 
-Both components use `useVirtualizer`'s `measureElement` for dynamic per-row sizing (rather than a single fixed row height), since row/card content height varies with wrapped text and action-button counts. Only rows within the viewport plus a small overscan are ever mounted to the DOM, regardless of total list length.
+All three components use `useVirtualizer`'s `measureElement` for dynamic per-row sizing (rather than a single fixed row height), since row/card content height varies with wrapped text and action-button counts. Only rows within the viewport plus a small overscan are ever mounted to the DOM, regardless of total list length — verified in `src/__tests__/VirtualizedDocumentsList.test.tsx`, `VirtualizedNftGrid.test.tsx`, and `AuditLogTimeline.test.tsx` with lists up to 10,000 items, asserting the mounted node count stays under 50.
 
-`@tanstack/react-virtual` was already present in `package-lock.json` as a transitive dependency of `@heroui/react`'s internal `Table`/`Listbox` virtualization (HeroUI's own `<Table isVirtualized>` uses it internally) — it is now also a direct dependency, pinned to the same locked version, since both pages call it directly.
+`@tanstack/react-virtual` was already present in `package-lock.json` as a transitive dependency of `@heroui/react`'s internal `Table`/`Listbox` virtualization (HeroUI's own `<Table isVirtualized>` uses it internally) — it is now also a direct dependency, pinned to the same locked version, since all three call it directly.

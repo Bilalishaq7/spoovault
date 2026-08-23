@@ -334,6 +334,7 @@ dependencies = [
  "elliptic-curve",
  "rfc6979",
  "signature",
+ "spki",
 ]
 
 [[package]]
@@ -379,6 +380,7 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "pkcs8",
  "rand_core",
  "sec1",
  "subtle",
@@ -623,7 +625,9 @@ dependencies = [
  "cfg-if",
  "ecdsa",
  "elliptic-curve",
+ "once_cell",
  "sha2",
+ "signature",
 ]
 
 [[package]]
@@ -898,6 +902,7 @@ dependencies = [
  "base16ct",
  "der",
  "generic-array",
+ "pkcs8",
  "subtle",
  "zeroize",
 ]
@@ -1224,6 +1229,9 @@ dependencies = [
 name = "spoovault_stellar"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "k256",
+ "sha3",
  "soroban-sdk",
 ]
 
