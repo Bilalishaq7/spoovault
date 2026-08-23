@@ -21,10 +21,23 @@ jobs:
       - name: Install dependencies (for OpenZeppelin imports)
         run: npm install --legacy-peer-deps
 
+      # The echidna image ships solc-select, but its bundled solc-select
+      # (an old Python 3.8 build) hits `HTTP 403` calling GitHub's release
+      # API to validate the requested version before installing it, so
+      # `solc-select install` fails before echidna ever runs. Sidestep it by
+      # downloading the exact solc build directly (same version pinned in
+      # hardhat.config.cjs) and pointing crytic-compile at it via
+      # fuzz/echidna/config.yaml's `cryticArgs: --solc`.
+      - name: Download solc 0.8.24
+        run: |
+          curl -sL -o solc-static-linux "https://github.com/ethereum/solidity/releases/download/v0.8.24/solc-static-linux"
+          chmod +x solc-static-linux
+
       - name: Run Echidna campaign
         run: |
           docker run --rm \
             -v "$PWD":/src -w /src \
+            --entrypoint echidna-test \
             trailofbits/echidna:v2.2.3 \
             /src/fuzz/harness/SpooVaultFuzz.sol \
             --contract SpooVaultFuzz \
@@ -49,10 +62,26 @@ jobs:
       - name: Install dependencies (for OpenZeppelin imports)
         run: npm install --legacy-peer-deps
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Medusa shells out to crytic-compile (a Python tool, not a Go one) to
+      # compile the Solidity harness, and crytic-compile itself resolves solc
+      # through solc-select. Neither is installed by default, so without this
+      # step medusa fails immediately with "crytic-compile: executable file
+      # not found in $PATH".
+      - name: Install crytic-compile
+        run: |
+          pip install --upgrade pip crytic-compile solc-select
+          solc-select install 0.8.24
+          solc-select use 0.8.24
+
       - name: Run Medusa campaign
         run: |
           export PATH="$HOME/go/bin:$PATH"
-          medusa fuzz --config fuzz/medusa/medusa.toml
+          medusa fuzz --config fuzz/medusa/medusa.json
 
   soroban-fuzz:
     name: Soroban proptest (cargo-fuzz / proptest)
@@ -65,6 +94,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -73,7 +103,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contracts-stellar/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts-stellar/Cargo.lock') }}
+            contracts-stellar/upgrade_fixture/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts-stellar/Cargo.lock', 'contracts-stellar/upgrade_fixture/Cargo.toml') }}
+
+      # The upgrade_contract integration test imports this fixture's
+      # compiled Wasm at compile time via `contractimport!`, so it must
+      # exist before `cargo test` on the main crate below.
+      - name: Build upgrade_fixture Wasm
+        working-directory: contracts-stellar/upgrade_fixture
+        run: cargo build --release --target wasm32-unknown-unknown
 
       - name: Format (Soroban crate)
         working-directory: contracts-stellar

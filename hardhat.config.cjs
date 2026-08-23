@@ -13,6 +13,7 @@ module.exports = {
     version: "0.8.24",
     settings: {
       evmVersion: "cancun",
+      viaIR: true,
       optimizer: {
         enabled: true,
         runs: 200,
@@ -26,6 +27,9 @@ module.exports = {
     showMethodSig: false,
   },
   networks: {
+    hardhat: {
+      allowUnlimitedContractSize: true,
+    },
     fuji: {
       url: process.env.VITE_AVALANCHE_RPC || "https://api.avax-test.network/ext/bc/C/rpc",
       accounts: process.env.DEPLOYER_PRIVATE_KEY
