@@ -655,3 +655,217 @@ mod cross_chain_revocation {
         );
     }
 }
+
+/// Upgrade governance: contract-wide multi-sig admin authorization for
+/// `upgrade_contract` (Wasm code replacement) and `migrate`.
+mod upgrade_governance {
+    use super::*;
+
+    /// The "new version" of the contract, imported as raw Wasm and uploaded
+    /// via `env.deployer().upload_contract_wasm` to give `upgrade_contract`
+    /// a real, already-present hash to swap to. Built by CI before this
+    /// crate's tests run (see `.github/workflows/fuzzing.yml` and
+    /// `.github/workflows/coverage.yml`); see
+    /// `contracts-stellar/upgrade_fixture/README.md` to build it locally.
+    mod new_contract {
+        soroban_sdk::contractimport!(
+            file = "upgrade_fixture/target/wasm32-unknown-unknown/release/spoovault_stellar_upgrade_fixture.wasm"
+        );
+    }
+
+    fn install_new_wasm(env: &Env) -> BytesN<32> {
+        env.deployer().upload_contract_wasm(new_contract::WASM)
+    }
+
+    #[test]
+    fn test_init_admins_records_configured_set_and_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        let admin_a = Address::generate(&env);
+        let admin_b = Address::generate(&env);
+        client.init_admins(&vec![&env, admin_a.clone(), admin_b.clone()], &2);
+
+        assert_eq!(client.get_admins(), vec![&env, admin_a, admin_b]);
+        assert_eq!(client.get_admin_threshold(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Admins already initialized")]
+    fn test_init_admins_rejects_reinitialization() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admins(&vec![&env, admin.clone()], &1);
+        client.init_admins(&vec![&env, admin], &1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid admin threshold")]
+    fn test_init_admins_rejects_threshold_above_admin_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admins(&vec![&env, admin], &2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Duplicate admin found")]
+    fn test_init_admins_rejects_duplicate_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admins(&vec![&env, admin.clone(), admin], &1);
+    }
+
+    #[test]
+    fn test_upgrade_contract_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admins(&vec![&env, admin], &1);
+
+        let not_admin = Address::generate(&env);
+        let some_hash = BytesN::from_array(&env, &[7u8; 32]);
+        let result = client.try_upgrade_contract(&not_admin, &some_hash);
+        assert_eq!(result, Err(Ok(UpgradeError::UnauthorizedAdmin)));
+    }
+
+    #[test]
+    fn test_upgrade_contract_rejects_before_admins_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        let caller = Address::generate(&env);
+        let some_hash = BytesN::from_array(&env, &[7u8; 32]);
+        let result = client.try_upgrade_contract(&caller, &some_hash);
+        assert_eq!(result, Err(Ok(UpgradeError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_upgrade_contract_does_not_swap_before_threshold_is_met() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        let admin_a = Address::generate(&env);
+        let admin_b = Address::generate(&env);
+        client.init_admins(&vec![&env, admin_a.clone(), admin_b], &2);
+
+        // Only one of the two required admins approves - the hash need not
+        // be a real uploaded Wasm blob, since the swap must not be
+        // attempted yet.
+        let some_hash = BytesN::from_array(&env, &[7u8; 32]);
+        client.upgrade_contract(&admin_a, &some_hash);
+
+        assert_eq!(client.version(), 1);
+    }
+
+    #[test]
+    fn test_upgrade_contract_rejects_duplicate_approval_from_same_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        let admin_a = Address::generate(&env);
+        let admin_b = Address::generate(&env);
+        client.init_admins(&vec![&env, admin_a.clone(), admin_b], &2);
+
+        let some_hash = BytesN::from_array(&env, &[7u8; 32]);
+        client.upgrade_contract(&admin_a, &some_hash);
+
+        let result = client.try_upgrade_contract(&admin_a, &some_hash);
+        assert_eq!(result, Err(Ok(UpgradeError::AlreadyApproved)));
+    }
+
+    #[test]
+    fn test_upgrade_contract_swaps_wasm_and_preserves_existing_state_once_threshold_met() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        // Existing state created under the v1 code, which must survive the
+        // upgrade untouched (Soroban storage is keyed by contract ID, not
+        // by the executing Wasm).
+        let creator = Address::generate(&env);
+        let guardian = Address::generate(&env);
+        let vault_id = client.create_vault(
+            &creator,
+            &String::from_str(&env, "Pre-upgrade Vault"),
+            &String::from_str(&env, "Created before the code swap"),
+            &vec![&env, guardian],
+            &1,
+        );
+
+        let admin_a = Address::generate(&env);
+        let admin_b = Address::generate(&env);
+        client.init_admins(&vec![&env, admin_a.clone(), admin_b.clone()], &2);
+
+        let new_wasm_hash = install_new_wasm(&env);
+        client.upgrade_contract(&admin_a, &new_wasm_hash);
+        assert_eq!(client.version(), 1, "must not swap before the threshold is met");
+
+        client.upgrade_contract(&admin_b, &new_wasm_hash);
+
+        // Existing persistent state survived the Wasm swap.
+        let preserved_vault = client.get_vault(&vault_id).expect("vault must survive upgrade");
+        assert_eq!(preserved_vault.name, String::from_str(&env, "Pre-upgrade Vault"));
+
+        // The code itself was actually replaced: a client built against the
+        // new contract's interface now works against this same contract ID,
+        // and exposes the new version/behavior.
+        let upgraded_client = new_contract::Client::new(&env, &contract_id);
+        assert_eq!(upgraded_client.version(), 2);
+        assert_eq!(upgraded_client.new_feature(), 1_010_101);
+    }
+
+    #[test]
+    fn test_migrate_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admins(&vec![&env, admin], &1);
+
+        let not_admin = Address::generate(&env);
+        let result = client.try_migrate(&not_admin);
+        assert_eq!(result, Err(Ok(UpgradeError::UnauthorizedAdmin)));
+    }
+
+    #[test]
+    fn test_migrate_is_idempotent_for_admin_at_current_schema_version() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admins(&vec![&env, admin.clone()], &1);
+
+        // Schema is already at CURRENT_SCHEMA_VERSION post-init, so this is
+        // a no-op both times - repeated invocation must not panic.
+        client.migrate(&admin);
+        client.migrate(&admin);
+    }
+}

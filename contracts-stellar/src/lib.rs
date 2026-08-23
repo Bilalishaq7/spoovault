@@ -5,7 +5,7 @@
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contractimpl, contracttype,
+    contract, contracterror, contractimpl, contracttype, panic_with_error,
     xdr::ToXdr,
     Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
@@ -27,6 +27,25 @@ pub const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
 pub const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
 /// ~30 days = 518,400 ledgers
 pub const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;
+
+/// Current persistent-storage schema version. Bumped whenever an upgrade
+/// changes the meaning/layout of existing storage; `migrate` transforms
+/// storage from a prior version up to this one and is a no-op once the
+/// stored `DataKey::SchemaVersion` already matches.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum UpgradeError {
+    /// `init_admins` has not been called yet, so there is no admin set to
+    /// authorize against.
+    NotInitialized = 1,
+    /// The caller is not a member of the configured admin set.
+    UnauthorizedAdmin = 2,
+    /// The caller already approved the currently pending upgrade proposal.
+    AlreadyApproved = 3,
+}
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +127,15 @@ pub struct VaultReleaseState {
     pub last_proof_of_life: u64,
 }
 
+/// A pending contract-code upgrade awaiting the configured admin threshold
+/// of distinct approvals before the Wasm swap is executed.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UpgradeProposal {
+    pub new_wasm_hash: BytesN<32>,
+    pub approved_by: Vec<Address>,
+}
+
 #[contracttype]
 pub enum DataKey {
     VaultCount,
@@ -137,6 +165,11 @@ pub enum DataKey {
     VaultGid(BytesN<32>),
     CrossChainRevoker(u64),
     RevocationNonce(BytesN<32>, u64, Address),
+    // Upgrade governance
+    Admins,
+    AdminThreshold,
+    UpgradeProposal,
+    SchemaVersion,
 }
 
 #[contract]
@@ -176,6 +209,190 @@ impl SpooVaultStellar {
         if env.storage().persistent().has(&req_key) {
             Self::bump_persistent(&env, &req_key);
         }
+    }
+
+    /// Contract code version. Bumped by whoever ships a new Wasm build;
+    /// used by upgrade integration tests to confirm a Wasm swap actually
+    /// took effect (a fresh client built against the new build's ABI will
+    /// observe the new version).
+    pub fn version(_env: Env) -> u32 {
+        1
+    }
+
+    // -------------------------------------------------------------------
+    // Upgrade governance
+    //
+    // A dedicated, contract-wide admin set (distinct from any vault's
+    // per-vault guardians) authorizes Wasm code upgrades. `upgrade_contract`
+    // mirrors `approve_access`'s established pattern in this contract: each
+    // admin calls the same entry point once, their approval is recorded,
+    // and once the configured threshold of distinct admins has approved the
+    // *same* `new_wasm_hash`, the swap executes automatically within that
+    // triggering call - there is no separate "propose" vs "execute" step.
+    // -------------------------------------------------------------------
+
+    /// One-time admin governance bootstrap. Every supplied admin must
+    /// individually authorize this call (rather than trusting a single
+    /// deployer to unilaterally hand admin power to addresses that never
+    /// consented). Reverts if admins are already initialized.
+    pub fn init_admins(env: Env, admins: Vec<Address>, threshold: u32) {
+        assert!(
+            !env.storage().instance().has(&DataKey::Admins),
+            "Admins already initialized"
+        );
+
+        let mut processed = Vec::new(&env);
+        for i in 0..admins.len() {
+            let admin = admins.get(i).unwrap();
+            admin.require_auth();
+            assert!(!processed.contains(&admin), "Duplicate admin found");
+            processed.push_back(admin.clone());
+        }
+
+        assert!(
+            threshold > 0 && threshold <= admins.len(),
+            "Invalid admin threshold"
+        );
+
+        env.storage().instance().set(&DataKey::Admins, &admins);
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminThreshold, &threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
+        Self::bump_instance(&env);
+    }
+
+    /// Returns the configured admin set (empty if `init_admins` has not
+    /// been called yet).
+    pub fn get_admins(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admins)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the configured admin approval threshold (0 if `init_admins`
+    /// has not been called yet).
+    pub fn get_admin_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AdminThreshold)
+            .unwrap_or(0)
+    }
+
+    /// Propose or co-sign a Wasm code upgrade to `new_wasm_hash`.
+    ///
+    /// `new_wasm_hash` must already be present on the ledger (uploaded via
+    /// `env.deployer().upload_contract_wasm`). Each call by a distinct
+    /// configured admin counts as one approval toward the configured
+    /// threshold. A call proposing a different hash than the currently
+    /// pending proposal (or the first call) starts a fresh proposal with
+    /// only that admin's approval recorded. Once enough distinct admins
+    /// have approved the *same* hash, the Wasm code is swapped atomically
+    /// within this same invocation via
+    /// `env.deployer().update_current_contract_wasm` - existing instance
+    /// and persistent storage is untouched by the swap itself (Soroban
+    /// storage is keyed by contract ID, not by the executing Wasm code), so
+    /// no data migration is required unless the new code changes how
+    /// existing storage should be interpreted (see `migrate`).
+    ///
+    /// Reverts with `UpgradeError::UnauthorizedAdmin` if `admin` is not in
+    /// the configured admin set, or `UpgradeError::NotInitialized` if
+    /// `init_admins` has not been called yet.
+    pub fn upgrade_contract(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+        Self::bump_instance(&env);
+
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admins)
+            .unwrap_or_else(|| panic_with_error!(&env, UpgradeError::NotInitialized));
+        if !admins.contains(&admin) {
+            panic_with_error!(&env, UpgradeError::UnauthorizedAdmin);
+        }
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminThreshold)
+            .unwrap_or(0);
+
+        let mut proposal: UpgradeProposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeProposal)
+            .unwrap_or(UpgradeProposal {
+                new_wasm_hash: new_wasm_hash.clone(),
+                approved_by: Vec::new(&env),
+            });
+
+        // A proposal for a different hash supersedes any stale pending one.
+        if proposal.new_wasm_hash != new_wasm_hash {
+            proposal = UpgradeProposal {
+                new_wasm_hash: new_wasm_hash.clone(),
+                approved_by: Vec::new(&env),
+            };
+        }
+
+        if proposal.approved_by.contains(&admin) {
+            panic_with_error!(&env, UpgradeError::AlreadyApproved);
+        }
+        proposal.approved_by.push_back(admin.clone());
+
+        if proposal.approved_by.len() >= threshold {
+            env.storage().instance().remove(&DataKey::UpgradeProposal);
+            env.deployer()
+                .update_current_contract_wasm(new_wasm_hash.clone());
+            env.events()
+                .publish((Symbol::new(&env, "contract_upgraded"),), new_wasm_hash);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeProposal, &proposal);
+        }
+    }
+
+    /// Post-upgrade storage migration hook, callable by any configured
+    /// admin. Idempotent per schema version: transforms persistent storage
+    /// laid out by a prior contract version and bumps
+    /// `DataKey::SchemaVersion` so re-invocation after that is a no-op.
+    /// Currently a no-op body (schema version 1 is the only version that
+    /// has existed); a future upgrade that changes the storage layout
+    /// implements its transformation here and bumps `CURRENT_SCHEMA_VERSION`.
+    ///
+    /// Reverts with `UpgradeError::UnauthorizedAdmin` if `admin` is not in
+    /// the configured admin set.
+    pub fn migrate(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::bump_instance(&env);
+
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admins)
+            .unwrap_or_else(|| panic_with_error!(&env, UpgradeError::NotInitialized));
+        if !admins.contains(&admin) {
+            panic_with_error!(&env, UpgradeError::UnauthorizedAdmin);
+        }
+
+        let current: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SchemaVersion)
+            .unwrap_or(1);
+        if current >= CURRENT_SCHEMA_VERSION {
+            return;
+        }
+
+        // Storage-layout transformations for schema versions below
+        // CURRENT_SCHEMA_VERSION are added here as the schema evolves.
+
+        env.storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
     }
 
     /// Register a user's encryption public key
