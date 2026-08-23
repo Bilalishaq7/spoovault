@@ -2,80 +2,17 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "./interfaces/ISpooVault.sol";
 
 /**
  * @title SpooVault
- * @dev NFT-powered multi-signature encrypted document vault
+ * @dev NFT-powered multi-signature encrypted document vault with ERC-165 standard access delegation interface.
  */
-contract SpooVault is ERC721 {
+contract SpooVault is ERC721, ISpooVault {
     uint256 private _tokenIdCounter;
     uint256 private _vaultIdCounter;
     uint256 private _documentIdCounter;
     uint256 private _requestIdCounter;
-
-    enum RequestStatus {
-        PENDING,
-        APPROVED,
-        REJECTED,
-        EXPIRED
-    }
-
-    enum AccessLevel {
-        READ,
-        READ_WRITE,
-        ADMIN
-    }
-
-    enum ReleaseCondition {
-        ANYTIME,
-        LIVE_ONLY,
-        EMERGENCY_ONLY,
-        POST_DEATH_ONLY
-    }
-
-    struct Vault {
-        uint256 id;
-        address creator;
-        string name;
-        string description;
-        address[] guardians;
-        uint256 approvalThreshold;
-        bool isActive;
-        uint256 createdAt;
-    }
-
-    struct Document {
-        uint256 id;
-        uint256 vaultId;
-        string encryptedMetadata;
-        string ipfsHash;
-        address uploadedBy;
-        uint256 uploadedAt;
-        AccessLevel requiredAccess;
-    }
-
-    struct AccessRequest {
-        uint256 requestId;
-        uint256 documentId;
-        address requester;
-        address[] approvedBy;
-        RequestStatus status;
-        uint256 expiresAt;
-        uint256 createdAt;
-    }
-
-    struct GuardianInvite {
-        address guardian;
-        uint256 vaultId;
-        bool accepted;
-        uint256 expiresAt;
-    }
-
-    struct VaultReleaseState {
-        bool emergencyMode;
-        uint256 inactivityPeriod;
-        uint256 lastProofOfLife;
-    }
 
     error AtLeastOneGuardian();
     error InvalidApprovalThreshold();
@@ -128,38 +65,60 @@ contract SpooVault is ERC721 {
     mapping(uint256 => mapping(address => uint256)) private _documentAccessVersion;
     mapping(uint256 => VaultReleaseState) private _vaultReleaseStates;
 
-    event VaultCreated(uint256 indexed vaultId, address indexed creator, string name);
-    event GuardianAdded(uint256 indexed vaultId, address indexed guardian);
-    event GuardianRemoved(uint256 indexed vaultId, address indexed guardian);
-    event DocumentAdded(uint256 indexed documentId, uint256 indexed vaultId, string ipfsHash);
-    event AccessRequested(uint256 indexed requestId, uint256 indexed documentId, address indexed requester);
-    event AccessApproved(uint256 indexed requestId, address indexed approver);
-    event AccessGranted(uint256 indexed requestId, uint256 indexed documentId, address indexed requester);
-    event NFTMinted(uint256 indexed tokenId, address indexed to, uint256 indexed vaultId);
-    event NFTBurned(uint256 indexed tokenId);
-    event AccessRevoked(uint256 indexed documentId, address indexed user);
-    event VaultReleaseConfigured(uint256 indexed vaultId, uint256 inactivityPeriod);
-    event ProofOfLifeRecorded(uint256 indexed vaultId, address indexed owner, uint256 timestamp);
-    event EmergencyModeUpdated(uint256 indexed vaultId, bool enabled);
-    event DocumentReleaseConditionSet(uint256 indexed documentId, ReleaseCondition condition);
-    event PublicKeyRegistered(address indexed user, string publicKey);
-    event GuardianSharesSaved(uint256 indexed documentId);
-    event ShareSubmittedForBeneficiary(uint256 indexed requestId, address indexed guardian, string encryptedShare);
-
-    function registerPublicKey(string calldata publicKey) external {
+    /**
+     * @notice Register ECIES public key for a user address.
+     * @param publicKey ECIES public key string.
+     */
+    function registerPublicKey(string calldata publicKey) external override {
         userPublicKeys[msg.sender] = publicKey;
         emit PublicKeyRegistered(msg.sender, publicKey);
     }
 
+    /**
+     * @notice Retrieve encrypted key share saved for a guardian.
+     * @param documentId ID of the document.
+     * @param guardian Address of the guardian.
+     */
     function getEncryptedGuardianShare(uint256 documentId, address guardian) external view returns (string memory) {
         return encryptedGuardianShares[documentId][guardian];
     }
 
+    /**
+     * @notice Retrieve encrypted key share submitted for a beneficiary.
+     * @param requestId ID of the access request.
+     * @param guardian Address of the guardian.
+     */
     function getBeneficiaryKeyShare(uint256 requestId, address guardian) external view returns (string memory) {
         return beneficiaryKeyShares[requestId][guardian];
     }
 
     constructor() ERC721("SpooVault Access Token", "SPVT") {}
+
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC721, IERC165) returns (bool) {
+        return interfaceId == type(ISpooVault).interfaceId || super.supportsInterface(interfaceId);
+    }
+
+    /**
+     * @notice Standardized cross-contract document access check returning status codes.
+     * @param documentId The ID of the document to inspect.
+     * @param user The address of the user or contract inquiring access.
+     * @return 0 = GRANTED, 1 = DOCUMENT_NOT_EXIST, 2 = NO_ACCESS, 3 = RELEASE_CONDITION_LOCKED.
+     */
+    function checkAccess(uint256 documentId, address user) external view override returns (uint8) {
+        if (documents[documentId].id == 0) {
+            return uint8(AccessCheckResult.DOCUMENT_NOT_EXIST);
+        }
+        if (!_isReleaseConditionSatisfied(documentId)) {
+            return uint8(AccessCheckResult.RELEASE_CONDITION_LOCKED);
+        }
+        if (!_hasActiveAccess(documentId, user)) {
+            return uint8(AccessCheckResult.NO_ACCESS);
+        }
+        return uint8(AccessCheckResult.GRANTED);
+    }
 
     /**
      * @dev Create a new vault with guardian invites.
@@ -417,7 +376,7 @@ contract SpooVault is ERC721 {
     /**
      * @dev Fetch vault release state summary.
      */
-    function getVaultReleaseState(uint256 vaultId) external view returns (
+    function getVaultReleaseState(uint256 vaultId) external view override returns (
         bool emergencyMode,
         uint256 inactivityPeriod,
         uint256 lastProofOfLife,
@@ -478,7 +437,7 @@ contract SpooVault is ERC721 {
     /**
      * @dev Request access to a document. Requires current ownership of a vault NFT.
      */
-    function requestAccess(uint256 documentId) external returns (uint256) {
+    function requestAccess(uint256 documentId) external override returns (uint256) {
         if (documents[documentId].id == 0) revert DocumentNotExist();
         if (_hasActiveAccess(documentId, msg.sender)) revert AlreadyHasAccess();
         if (!_isReleaseConditionSatisfied(documentId)) revert ReleaseConditionLocked();
@@ -519,14 +478,14 @@ contract SpooVault is ERC721 {
     /**
      * @dev Approve an access request (guardian only).
      */
-    function approveAccess(uint256 requestId) external {
+    function approveAccess(uint256 requestId) external override {
         _approveAccess(requestId, "");
     }
 
     /**
      * @dev Approve an access request and submit the decrypted key share for the beneficiary.
      */
-    function approveAccess(uint256 requestId, string calldata encryptedShareForBeneficiary) external {
+    function approveAccess(uint256 requestId, string calldata encryptedShareForBeneficiary) external override {
         _approveAccess(requestId, encryptedShareForBeneficiary);
     }
 
@@ -564,7 +523,7 @@ contract SpooVault is ERC721 {
     /**
      * @dev Revoke access from user for a specific document.
      */
-    function revokeAccess(uint256 documentId, address user) external {
+    function revokeAccess(uint256 documentId, address user) external override {
         if (documents[documentId].id == 0) revert DocumentNotExist();
 
         uint256 vaultId = documents[documentId].vaultId;
@@ -584,7 +543,7 @@ contract SpooVault is ERC721 {
         uint256 vaultId,
         address to,
         string memory tokenURIValue
-    ) external returns (uint256) {
+    ) external override returns (uint256) {
         if (!vaults[vaultId].isActive) revert VaultNotActive();
         if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
 
@@ -602,7 +561,7 @@ contract SpooVault is ERC721 {
     /**
      * @dev Burn NFT access token and invalidate all prior grants for owner+vault in O(1).
      */
-    function burnAccessToken(uint256 tokenId) external {
+    function burnAccessToken(uint256 tokenId) external override {
         address owner = ownerOf(tokenId);
         if (!_isTokenOwnerOrApproved(owner, msg.sender, tokenId)) {
             revert NotOwnerOrApproved();
@@ -622,7 +581,7 @@ contract SpooVault is ERC721 {
     /**
      * @dev Get vault details.
      */
-    function getVault(uint256 vaultId) external view returns (
+    function getVault(uint256 vaultId) external view override returns (
         uint256 id,
         address creator,
         string memory name,
@@ -674,21 +633,21 @@ contract SpooVault is ERC721 {
     /**
      * @dev Return vault id attached to token id (0 if missing/deleted).
      */
-    function getTokenVault(uint256 tokenId) external view returns (uint256) {
+    function getTokenVault(uint256 tokenId) external view override returns (uint256) {
         return tokenVaultMapping[tokenId];
     }
 
     /**
      * @dev Returns whether user currently holds any token for vault.
      */
-    function hasVaultToken(address user, uint256 vaultId) external view returns (bool) {
+    function hasVaultToken(address user, uint256 vaultId) external view override returns (bool) {
         return _ownsVaultToken(user, vaultId);
     }
 
     /**
      * @dev Returns effective access, tied to both granted access and live vault token ownership.
      */
-    function hasActiveAccess(uint256 documentId, address user) external view returns (bool) {
+    function hasActiveAccess(uint256 documentId, address user) external view override returns (bool) {
         if (documents[documentId].id == 0) {
             return false;
         }

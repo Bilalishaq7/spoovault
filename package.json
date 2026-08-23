@@ -19,8 +19,8 @@
   "dependencies": {
     "@heroui/react": "^2.0.0",
     "@heroui/theme": "^2.0.0",
-    "@openzeppelin/contracts": "^5.0.0",
     "@metamask/eth-sig-util": "^8.2.0",
+    "@openzeppelin/contracts": "^5.0.0",
     "@stellar/freighter-api": "^2.0.0",
     "@stellar/stellar-sdk": "^12.1.0",
     "axios": "^1.6.0",
@@ -62,6 +62,6 @@
     "typechain": "^8.3.0",
     "typescript": "^5.0.2",
     "vite": "^5.0.0",
-    "vitest": "^4.1.10"
+    "vitest": "^2.1.9"
   }
 }
