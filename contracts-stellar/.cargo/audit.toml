@@ -1,0 +1,10 @@
+# Transitive advisories from the pinned soroban-sdk 20.x stack.
+# These crates are locked by soroban-env-host / soroban-sdk and cannot be
+# upgraded independently without a major Soroban SDK bump.
+[advisories]
+ignore = [
+  # curve25519-dalek 4.1.2 — required as `>=4.1.1, <=4.1.2` by soroban-env-host 20.3.0
+  "RUSTSEC-2024-0344",
+  # time 0.3.44 — serde_with/soroban-ledger-snapshot pin prevents bump to >=0.3.47
+  "RUSTSEC-2026-0009",
+]

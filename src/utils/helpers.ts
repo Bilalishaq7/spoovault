@@ -71,30 +71,54 @@ export const formatDate = (timestamp: number): string => {
 };
 
 /**
- * Validate Stellar address (StrKey: G = Ed25519 Public Key, C = Contract ID)
+ * Validate EVM address format (0x...)
+ */
+export const isValidEVMAddress = (address: string): boolean => {
+  if (!address || typeof address !== "string") return false;
+  return /^0x[a-fA-F0-9]{40}$/.test(address.trim());
+};
+
+/**
+ * Validate Stellar address format (G... or C...)
  */
 export const isValidStellarAddress = (address: string): boolean => {
-  return /^G[A-Z2-7]{55}$/.test(address) || /^C[A-Z2-7]{55}$/.test(address);
+  if (!address || typeof address !== "string") return false;
+  const trimmed = address.trim();
+  return /^G[A-Z2-7]{55}$/.test(trimmed) || /^C[A-Z2-7]{55}$/.test(trimmed);
 };
 
 /**
- * Validate Ethereum address
+ * Validate address format on either EVM or Stellar networks
  */
-export const isValidAddress = (address: string, ecosystem?: "avalanche" | "stellar"): boolean => {
-  if (ecosystem === "stellar") {
-    return isValidStellarAddress(address);
-  }
-  if (ecosystem === "avalanche") {
-    return /^0x[a-fA-F0-9]{40}$/.test(address);
-  }
-  return /^0x[a-fA-F0-9]{40}$/.test(address) || isValidStellarAddress(address);
+export const isValidMultiChainAddress = (address: string): boolean => {
+  return isValidEVMAddress(address) || isValidStellarAddress(address);
 };
 
 /**
- * Get IPFS gateway URL
+ * Validate address (supports both EVM and Stellar format)
+ */
+export const isValidAddress = (address: string, networkOrEcosystem?: string): boolean => {
+  if (networkOrEcosystem === "stellar") return isValidStellarAddress(address);
+  if (networkOrEcosystem === "avalanche" || networkOrEcosystem === "evm") return isValidEVMAddress(address);
+  return isValidMultiChainAddress(address);
+};
+
+/**
+ * Get a deterministic IPFS gateway URL (primary gateway, for display/copy).
  */
 export const getIPFSURL = (hash: string): string => {
   return ipfsService.getURL(hash);
+};
+
+/**
+ * Download IPFS content with multi-gateway race fetch and circuit breaker.
+ * Failover is automatic on HTTP 429, timeouts, and other gateway errors.
+ */
+export const fetchFromIPFS = (
+  hash: string,
+  init?: RequestInit
+): Promise<Response> => {
+  return ipfsService.fetchFile(hash, init);
 };
 
 /**

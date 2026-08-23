@@ -19,6 +19,7 @@ import {
   FiUnlock,
   FiBell,
   FiBook,
+  FiActivity,
 } from "react-icons/fi";
 import { useWeb3 } from "../context/Web3Context";
 import { contractService } from "../services/contract.service";
@@ -26,6 +27,7 @@ import { shortenAddress } from "../utils/helpers";
 import { toast } from "react-hot-toast";
 import { buttonClasses } from "../utils/buttonClasses";
 import BrandLogo from "../components/BrandLogo";
+import OfflineBanner from "../components/offline/OfflineBanner";
 
 const AppLayout = () => {
   const location = useLocation();
@@ -73,6 +75,7 @@ const AppLayout = () => {
 
   const navItems = [
     { path: "/dashboard", label: "Dashboard", icon: FiHome },
+    { path: "/analytics", label: "Analytics", icon: FiActivity },
     { path: "/vaults", label: "Access Vaults", icon: FiShield },
     { path: "/documents", label: "Documents", icon: FiFile },
     { path: "/access", label: "My Access", icon: FiUnlock },
@@ -83,6 +86,7 @@ const AppLayout = () => {
 
   const mobileNavItems = [
     { path: "/dashboard", label: "Home", icon: FiHome },
+    { path: "/analytics", label: "Stats", icon: FiActivity },
     { path: "/vaults", label: "Vaults", icon: FiShield },
     { path: "/documents", label: "Docs", icon: FiFile },
     { path: "/access", label: "Access", icon: FiUnlock },
@@ -276,6 +280,7 @@ const AppLayout = () => {
 
   return (
     <div className="app-shell-bg min-h-screen">
+      <OfflineBanner />
       <aside
         className={`hidden lg:flex fixed left-0 top-0 h-screen border-r border-gray-800/80 bg-gray-950/90 backdrop-blur-2xl z-50 shadow-[18px_0_40px_-34px_rgba(0,0,0,0.95)] transition-[width] duration-300 overflow-visible ${
           desktopSidebarExpanded ? "w-[20rem]" : "w-[4.5rem]"
@@ -677,7 +682,7 @@ const AppLayout = () => {
 
       <nav className="lg:hidden fixed inset-x-0 bottom-0 z-40 px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         <div className="mx-auto max-w-md rounded-2xl border border-gray-800/80 bg-gray-900/92 backdrop-blur-2xl shadow-[0_16px_30px_-22px_rgba(0,0,0,0.95)]">
-          <div className="grid grid-cols-5 gap-1 p-1.5">
+          <div className="grid grid-cols-6 gap-1 p-1.5">
             {mobileNavItems.map((item) => {
               const Icon = item.icon;
               const active = isActive(item.path);

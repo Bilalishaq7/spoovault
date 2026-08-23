@@ -24,7 +24,10 @@ Enterprise-grade document custody app supporting both **Avalanche (EVM)** and **
 - **Zero-Knowledge Client-Side Encryption**: Documents are encrypted in the browser with TweetNaCl / AES-256 before leaving your device.
 - **Guardian Multi-Sig Approval**: Distribute access keys across trusted guardians requiring threshold approval before document release.
 - **Proof-of-Life & Dead-Man's Switch**: Configurable inactivity timers automatically release encrypted access packages to designated beneficiaries if owner heartbeat lapses.
+- **Web3 Keeper Heartbeat Relay**: Vault owners can delegate proof-of-life heartbeats to automation keepers (Chainlink Automation / Gelato) via an EIP-712 signed authorization on Avalanche or a native on-chain authorization on Soroban, so a missed personal check-in doesn't trigger a false emergency unlock. See `docs/HEARTBEAT_RELAYER.md`.
 - **IPFS Storage & Proxying**: Decoupled decentralized storage with optional serverless proxy to prevent Pinata API key exposure.
+- **Private Information Retrieval (PIR)**: Oblivious IPFS document fetching using dummy query batching and optional Tor proxy routing to prevent gateway surveillance.
+- **Real-Time Event Indexing**: High-performance Soroban contract event indexer with WebSocket real-time broadcast and exponential backoff reconnection.
 - **NFT Access Passes**: Tokenized authorization layers representing access rights to specific document vaults.
 
 ---
@@ -64,6 +67,10 @@ VITE_AVALANCHE_RPC=https://api.avax-test.network/ext/bc/C/rpc
 VITE_CHAIN_ID=43113
 VITE_CHAIN_NAME=Avalanche Fuji Testnet
 VITE_IPFS_GATEWAY=https://gateway.pinata.cloud/ipfs/
+# VITE_IPFS_PROXY_URL=http://localhost:3001
+# VITE_SPOOVUALT_PROXY_SECRET=
+# Optional: extra download gateways (Pinata, Infura, Cloudflare, ipfs.io are already pooled)
+# VITE_IPFS_FALLBACK_GATEWAYS=
 ```
 
 ### 4. Run Development Server

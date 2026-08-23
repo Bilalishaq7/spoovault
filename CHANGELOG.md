@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **EIP-712 / Soroban Auth Relayer for Automated Proof-of-Life Heartbeats (Issue #32)**:
+  - `SpooVault.sol`: `authorizeKeeperBySig`, `revokeKeeper`, and `proveLifeByKeeper` let a vault owner delegate proof-of-life heartbeats to a Web3 Keeper (Chainlink Automation / Gelato) via a one-time EIP-712 typed signature, so the keeper can relay heartbeats on its own signed transactions until the delegation expires without needing a fresh owner signature each time.
+  - `contracts-stellar/src/lib.rs`: `authorize_keeper`, `revoke_keeper`, and `prove_life_by_keeper` mirror the same delegation model using Soroban's native `require_auth`, which already decouples the authorizing owner from the fee-paying/submitting keeper.
+  - `contractService`/`stellarService`: signing and relay helpers (`signKeeperAuthorization`, `relayKeeperAuthorization`, `revokeKeeper`, `relayProofOfLife` / `authorizeKeeper`, `revokeKeeperAuthorization`, `relayProofOfLifeAsKeeper`, `getKeeperAuthorization`) for both chains.
+  - Reference keeper jobs: `scripts/keeper-relay-evm.mjs` and `scripts/keeper-relay-soroban.mjs`.
+  - Hardhat tests (`test/HeartbeatRelay.test.cjs`) and Soroban `cargo test` coverage (`contracts-stellar/src/test.rs`) for the authorization, expiry, revocation, and replay-protection paths on both chains.
+- **Pinata proxy HMAC auth and CORS lock-down (Issue #27)**:
+  - Restricted `scripts/pinata-proxy.mjs` CORS to `SPOOVUALT_ALLOWED_ORIGINS` instead of `Access-Control-Allow-Origin: *`.
+  - Required `X-SpooVault-Signature` HMAC verification on pin/list routes so unsigned external requests are rejected with 403 Forbidden, keeping the Pinata JWT off the public internet.
+- **Multi-gateway IPFS download circuit breaker (Issue #26)**:
+  - Replaced single-gateway Pinata document fetches with a race across Pinata, Infura IPFS, Cloudflare IPFS, and ipfs.io.
+  - Per-gateway circuit breaker skips endpoints that return HTTP 429, time out, or fail with 401/403/5xx until cooldown elapses, so public Pinata rate limits no longer crash document loading.
+  - Wired `fetchFromIPFS` into Documents, Access Center, and NFT `ipfs://` metadata loads; uploads remain on Pinata/proxy.
 - **Web Crypto API ECIES Migration (Issue #17)**:
   - Replaced deprecated MetaMask `eth_decrypt` and `eth_getEncryptionPublicKey` RPC methods with browser-native Web Crypto API ECIES (ECDH P-256 + AES-256-GCM).
   - Built `clientKeyringService` with browser IndexedDB storage (`spoovault-keyring`), encrypting client-side private keys using PBKDF2-SHA256 (600,000 iterations) + AES-256-GCM with optional PIN/passphrase protection and in-memory session caching.
@@ -25,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **UTF-8 Multi-byte Character Encoding in Crypto Utilities**: Fixed character corruption and potential `DOMException: Invalid character` errors when encoding/decoding Base64 payloads containing multi-byte UTF-8 characters (emojis, international characters, and symbols) by refactoring to standard `TextEncoder` and `TextDecoder` APIs.
-
+- **Timestamp Manipulation Guard on Post-Death Release** (#4): `SpooVault.sol` and `contracts-stellar/src/lib.rs` no longer unlock post-death release conditions from `block.timestamp`/ledger-timestamp comparisons alone. Both contracts now also require a minimum block/ledger-sequence delta (`MIN_POST_DEATH_BLOCK_DELTA` / `MIN_POST_DEATH_SEQUENCE_DELTA`, 256) to have elapsed since the last recorded proof of life, closing the window for miners/validators to trigger an early release via short-range timestamp drift.
 
 ---
 
