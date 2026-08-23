@@ -2,6 +2,8 @@
 
 interface ImportMetaEnv {
   readonly VITE_CONTRACT_ADDRESS?: string;
+  readonly VITE_STELLAR_CONTRACT_ADDRESS?: string;
+  readonly VITE_STELLAR_RPC_URL?: string;
   readonly VITE_PINATA_API_KEY?: string;
   readonly VITE_PINATA_API_SECRET?: string;
   readonly VITE_PINATA_JWT?: string;
