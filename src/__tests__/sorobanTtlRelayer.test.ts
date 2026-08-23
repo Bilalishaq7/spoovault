@@ -193,9 +193,6 @@ let relayer: {
   validateConfig: (cfg: unknown) => void;
 };
 
-// Inject mock SDK and import module under test before all tests
-const CONTRACT_ID = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
-const SECRET_KEY = "SBXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
 // Use a realistic 56-char C-strkey contract ID for validation tests
 const VALID_CONTRACT_ID = "C" + "A".repeat(55);
 
@@ -205,7 +202,7 @@ beforeEach(async () => {
   vi.resetModules();
 
   // Import after reset so we get a fresh module instance
-  relayer = await import("../../scripts/soroban-ttl-relayer.mjs") as typeof relayer;
+  relayer = (await import("../../scripts/soroban-ttl-relayer.mjs")) as unknown as typeof relayer;
 
   // Prime the SDK by resolving loadSdk once with the mock
   const mockSdk = buildMockSdk();
@@ -224,7 +221,7 @@ beforeEach(async () => {
   vi.doMock("@stellar/stellar-sdk", () => mockSdk);
 
   // Re-import after doMock
-  relayer = await import("../../scripts/soroban-ttl-relayer.mjs") as typeof relayer;
+  relayer = (await import("../../scripts/soroban-ttl-relayer.mjs")) as unknown as typeof relayer;
 
   // Call loadSdk once so the internal _sdk variable is populated
   await relayer.loadSdk();
@@ -516,7 +513,7 @@ describe("scanAndBumpEntityType", () => {
 
     return {
       getAccount: vi.fn(async () => ({ id: "GBRELAYER", sequence: "0" })),
-      getLedgerEntries: vi.fn(async () => ({
+      getLedgerEntries: vi.fn(async (..._args: any[]): Promise<any> => ({
         entries:
           liveUntilLedgerSeq !== undefined
             ? [{ liveUntilLedgerSeq }]
@@ -533,7 +530,7 @@ describe("scanAndBumpEntityType", () => {
     };
   };
 
-  const defaultOpts = (server: ReturnType<typeof makeServer>, vaultCount: bigint = 2n) => ({
+  const defaultOpts = (server: any) => ({
     server,
     keypair: MockKeypair.fromSecret("SBXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
     contractId: VALID_CONTRACT_ID,
