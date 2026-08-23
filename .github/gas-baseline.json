@@ -1,9 +1,9 @@
 {
   "version": 2,
   "compilerFingerprint": "bf393b2ba114",
-  "updatedAt": "2026-08-23T21:16:43.673Z",
+  "updatedAt": "2026-08-23T21:40:10.446Z",
   "gas": {
-    "CrossChainIdentityRegistry.bindIdentity(address,string,bytes32,uint256,bytes,bytes)": 1531398,
+    "CrossChainIdentityRegistry.bindIdentity(address,string,bytes32,uint256,bytes,bytes)": 1530107,
     "ERC6551Registry.createAccount(address,uint256,address,uint256,uint256,bytes)": 131636,
     "MockVRFCoordinator.fulfill(uint256,uint256)": 80941,
     "SpooAccountImplementation.executeCall(address,uint256,bytes)": 97770,
@@ -16,7 +16,7 @@
     "SpooVault.approveAccess(uint256)": 176042,
     "SpooVault.approveGuardianRemoval(uint256,address)": 96275,
     "SpooVault.approveThresholdUpdate(uint256,uint256)": 94840,
-    "SpooVault.authorizeKeeperBySig(uint256,address,uint256,bytes)": 105793,
+    "SpooVault.authorizeKeeperBySig(uint256,address,uint256,bytes)": 105794,
     "SpooVault.burnAccessToken(uint256)": 57147,
     "SpooVault.configureVaultRelease(uint256,uint256)": 42641,
     "SpooVault.configureVrf(address,bytes32,uint256,uint32,uint16)": 113320,
