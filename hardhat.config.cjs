@@ -31,7 +31,7 @@ module.exports = {
     enabled: gasReporterEnabled,
     noColors: true,
     outputFile: "gas-report.txt",
-    showMethodSig: false,
+    showMethodSig: true,
   },
   networks: {
     hardhat: {
