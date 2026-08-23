@@ -470,7 +470,7 @@ impl SpooVaultStellar {
         user.require_auth();
         Self::bump_instance(&env);
 
-        assert!(new_public_key.len() > 0, "New public key is required");
+        assert!(!new_public_key.is_empty(), "New public key is required");
         assert!(
             old_public_key != new_public_key,
             "New key must differ from old key"
