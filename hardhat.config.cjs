@@ -38,7 +38,9 @@ module.exports = {
       allowUnlimitedContractSize: true,
     },
     fuji: {
-      url: process.env.VITE_AVALANCHE_RPC || "https://api.avax-test.network/ext/bc/C/rpc",
+      url:
+        process.env.VITE_AVALANCHE_RPC ||
+        "https://api.avax-test.network/ext/bc/C/rpc",
       accounts: process.env.DEPLOYER_PRIVATE_KEY
         ? [process.env.DEPLOYER_PRIVATE_KEY]
         : [],
