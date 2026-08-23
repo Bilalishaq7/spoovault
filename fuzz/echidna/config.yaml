@@ -15,5 +15,5 @@ cryticArgs:
   - "--solc-remaps"
   - "@openzeppelin/=/src/node_modules/@openzeppelin/"
   - "--solc-args"
-  - "--optimize --optimizer-runs 200 --evm-version cancun"
+  - "--optimize --optimize-runs 200 --evm-version cancun"
 
