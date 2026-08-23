@@ -52,7 +52,6 @@ export interface KeyPairRecord {
 }
 
 /**
-/**
  * Options for keypair generation.
  */
 export interface GenerateKeyPairOptions {
@@ -63,6 +62,8 @@ export interface GenerateKeyPairOptions {
    */
   enablePasskey?: boolean;
 }
+
+/**
  * OPAQUE-inspired credential envelope. The wrapping key is derived from
  * HKDF(PBKDF2(pin, salt = OPRF(account))) where the OPRF secret lives only
  * inside the non-extractable `oprfKey` CryptoKey of the stored record.
