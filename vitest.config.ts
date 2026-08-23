@@ -2,6 +2,14 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "test/**",
+      "e2e/**",
+      "contracts/**",
+      "contracts-stellar/**",
+    ],
     projects: [
       // ── Node / crypto / service tests ─────────────────────────────────────
       // fileParallelism:false runs test files serially in one fork, so tests
@@ -27,10 +35,7 @@ export default defineConfig({
       {
         test: {
           name: "jsdom",
-          include: [
-            "src/__tests__/VirtualizedDocumentsList.test.tsx",
-            "src/__tests__/VirtualizedNftGrid.test.tsx",
-          ],
+          include: ["src/__tests__/**/*.test.tsx"],
           globals: true,
           environment: "jsdom",
           pool: "forks",
