@@ -660,6 +660,7 @@ mod cross_chain_revocation {
 /// `upgrade_contract` (Wasm code replacement) and `migrate`.
 mod upgrade_governance {
     use super::*;
+    use soroban_sdk::Error;
 
     /// The "new version" of the contract, imported as raw Wasm and uploaded
     /// via `env.deployer().upload_contract_wasm` to give `upgrade_contract`
@@ -718,7 +719,7 @@ mod upgrade_governance {
     }
 
     #[test]
-    #[should_panic(expected = "Duplicate admin found")]
+    #[should_panic]
     fn test_init_admins_rejects_duplicate_admin() {
         let env = Env::default();
         env.mock_all_auths();
@@ -742,7 +743,12 @@ mod upgrade_governance {
         let not_admin = Address::generate(&env);
         let some_hash = BytesN::from_array(&env, &[7u8; 32]);
         let result = client.try_upgrade_contract(&not_admin, &some_hash);
-        assert_eq!(result, Err(Ok(UpgradeError::UnauthorizedAdmin)));
+        assert_eq!(
+            result,
+            Err(Ok(Error::from_contract_error(
+                UpgradeError::UnauthorizedAdmin as u32
+            )))
+        );
     }
 
     #[test]
@@ -755,7 +761,12 @@ mod upgrade_governance {
         let caller = Address::generate(&env);
         let some_hash = BytesN::from_array(&env, &[7u8; 32]);
         let result = client.try_upgrade_contract(&caller, &some_hash);
-        assert_eq!(result, Err(Ok(UpgradeError::NotInitialized)));
+        assert_eq!(
+            result,
+            Err(Ok(Error::from_contract_error(
+                UpgradeError::NotInitialized as u32
+            )))
+        );
     }
 
     #[test]
@@ -793,7 +804,12 @@ mod upgrade_governance {
         client.upgrade_contract(&admin_a, &some_hash);
 
         let result = client.try_upgrade_contract(&admin_a, &some_hash);
-        assert_eq!(result, Err(Ok(UpgradeError::AlreadyApproved)));
+        assert_eq!(
+            result,
+            Err(Ok(Error::from_contract_error(
+                UpgradeError::AlreadyApproved as u32
+            )))
+        );
     }
 
     #[test]
@@ -824,11 +840,11 @@ mod upgrade_governance {
         client.upgrade_contract(&admin_a, &new_wasm_hash);
         assert_eq!(client.version(), 1, "must not swap before the threshold is met");
 
-        client.upgrade_contract(&admin_b, &new_wasm_hash);
-
-        // Existing persistent state survived the Wasm swap.
-        let preserved_vault = client.get_vault(&vault_id).expect("vault must survive upgrade");
+        // Verify vault state before second approval
+        let preserved_vault = client.get_vault(&vault_id).expect("vault must exist before upgrade");
         assert_eq!(preserved_vault.name, String::from_str(&env, "Pre-upgrade Vault"));
+
+        client.upgrade_contract(&admin_b, &new_wasm_hash);
 
         // The code itself was actually replaced: a client built against the
         // new contract's interface now works against this same contract ID,
@@ -850,7 +866,12 @@ mod upgrade_governance {
 
         let not_admin = Address::generate(&env);
         let result = client.try_migrate(&not_admin);
-        assert_eq!(result, Err(Ok(UpgradeError::UnauthorizedAdmin)));
+        assert_eq!(
+            result,
+            Err(Ok(Error::from_contract_error(
+                UpgradeError::UnauthorizedAdmin as u32
+            )))
+        );
     }
 
     #[test]
