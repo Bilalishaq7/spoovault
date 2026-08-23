@@ -49,7 +49,7 @@ async function importKey(hexKey: string): Promise<CryptoKey> {
   const keyBytes = hexToBytes(hexKey);
   return await crypto.subtle.importKey(
     "raw",
-    keyBytes,
+    keyBytes as unknown as BufferSource,
     { name: "AES-GCM" },
     false,
     ["encrypt", "decrypt"]
@@ -79,7 +79,7 @@ self.onmessage = async (event: MessageEvent<CryptoWorkerRequest>) => {
         type: "ENCRYPT_SUCCESS",
         result: resultBuffer.buffer,
       };
-      self.postMessage(response, [response.result]);
+      (self as any).postMessage(response, [response.result]);
     } else if (type === "DECRYPT") {
       const cryptoKey = await importKey(payload.key);
       const dataBytes = new Uint8Array(payload.data);
@@ -98,7 +98,7 @@ self.onmessage = async (event: MessageEvent<CryptoWorkerRequest>) => {
         type: "DECRYPT_SUCCESS",
         result: decrypted,
       };
-      self.postMessage(response, [response.result]);
+      (self as any).postMessage(response, [response.result]);
     } else if (type === "SPLIT_SECRET") {
       const { secretHex, n, k } = payload;
       const { shares, commitments } = splitSecretVSS(secretHex, n, k);

@@ -77,7 +77,7 @@ class CryptoWorkerService {
     const keyBytes = this.hexToBytes(hexKey);
     return await crypto.subtle.importKey(
       "raw",
-      keyBytes,
+      keyBytes as unknown as BufferSource,
       { name: "AES-GCM" },
       false,
       ["encrypt", "decrypt"]
