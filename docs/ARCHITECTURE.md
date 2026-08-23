@@ -59,8 +59,10 @@ SpooVault is an enterprise-grade document custody and secret sharing application
 ## 4. IPFS Storage, Gateway Pool & Circuit Breaker
 
 To prevent client-side leaks of Pinata API credentials:
-- Production **uploads** route through a lightweight proxy script (`scripts/pinata-proxy.mjs`).
-- Upload payloads are authenticated using ephemeral tokens or scoped proxy headers.
+- Production pin requests route through `scripts/pinata-proxy.mjs`. The Pinata JWT stays on the server.
+- CORS is restricted to `SPOOVUALT_ALLOWED_ORIGINS` (local Vite URLs by default). Wildcard `Access-Control-Allow-Origin: *` is not used.
+- Every `/api/ipfs/*` pin or list call must present `X-SpooVault-Signature: t=<unix>,v1=<hmac-sha256-hex>`. The HMAC covers timestamp, method, path, and body hash. Unsigned or cross-origin callers receive **403 Forbidden**.
+- The frontend signs with `VITE_SPOOVUALT_PROXY_SECRET` (a dedicated HMAC key, not the Pinata JWT). See `scripts/lib/ipfsProxyGuard.mjs`.
 
 Document **downloads** no longer depend on a single Pinata URL. `src/services/ipfsGateway.ts` races a public gateway pool and fails over automatically when the primary gateway rate-limits or stalls:
 
@@ -75,8 +77,107 @@ Callers use `ipfsService.fetchFile` / `fetchFromIPFS` (Documents, Access Center,
 
 ---
 
-## 5. Read-Call Caching
+## 5. Private Information Retrieval (PIR)
+
+To prevent IPFS gateway surveillance (where gateways log requester IP addresses and requested CIDs, allowing correlation of beneficiary identities with specific vault documents), SpooVault implements Private Information Retrieval (PIR) principles:
+
+### PIR Components (`src/services/pir.service.ts`)
+
+1. **HomomorphicHash**: Generates deterministic but non-reversible CID identifiers using SHA-256 with per-session salt. Same CID produces same hash within a session, but different sessions produce different hashes, preventing gateway operators from identifying specific documents from logged hashes.
+
+2. **DummyQueryBatcher**: Generates dummy IPFS queries that look like real CIDs (CIDv0 format) and batches real queries with dummy queries to obscure which document is being fetched. The batch is shuffled to prevent position-based analysis. Configurable dummy query count (default: 5) and batch delay (default: 100ms).
+
+3. **TorProxyClient**: SOCKS5 proxy client for routing IPFS requests through Tor, providing IP address anonymity when fetching documents. Requires local Tor daemon with SOCKS5 proxy enabled (default: 127.0.0.1:9050). Falls back to standard fetch if Tor is unavailable.
+
+### PIR Integration
+
+The PIR service integrates with the existing IPFS gateway infrastructure:
+- `ipfsService.fetchFileWithPIR()`: New method that uses PIR for document fetches
+- Falls back to standard `ipfsGateway.fetchFile()` if PIR is disabled
+- Maintains compatibility with existing multi-gateway circuit breaker
+- Works with existing gateway pool and health scoring system
+
+### Configuration
+
+PIR is configured via environment variables (see `.env.example`):
+- `VITE_PIR_ENABLED`: Enable PIR to obscure which documents are being fetched
+- `VITE_PIR_USE_TOR`: Use Tor SOCKS5 proxy for IPFS fetches
+- `VITE_PIR_TOR_HOST`: Tor SOCKS5 proxy host (default: 127.0.0.1)
+- `VITE_PIR_TOR_PORT`: Tor SOCKS5 proxy port (default: 9050)
+- `VITE_PIR_DUMMY_COUNT`: Number of dummy queries to batch with real queries (default: 5)
+- `VITE_PIR_BATCH_DELAY`: Delay between dummy queries in milliseconds (default: 100)
+
+### Security Properties
+
+- **Oblivious Gateway Querying**: Real queries are batched with dummy queries, making it statistically difficult for gateways to identify which query corresponds to the actual document
+- **Mixnet Proxy Routing**: When enabled, all IPFS requests are routed through Tor's SOCKS5 proxy for IP address anonymity
+- **Encrypted CID Index**: CIDs are hashed with session-specific salts before logging, making hashes non-reversible
+
+See `docs/PIR_ARCHITECTURE.md` for detailed PIR architecture and usage documentation.
+
+---
+
+## 7. Soroban Event Indexer
+
+To address the latency and RPC payload overhead from polling Soroban RPC `getEvents`, SpooVault implements a high-performance event indexing system:
+
+### Event Indexer Components (`src/services/sorobanEventIndexer.service.ts`)
+
+1. **SorobanEventIndexer**: Main indexer with RPC polling and WebSocket relay integration. Implements exponential backoff reconnection for RPC connection drops and configurable polling intervals.
+
+2. **EventStore**: Enhanced IndexedDB persistence with topic-based indexing for efficient queries. Stores events, maintains topic indexes, and persists cursors for resumable polling.
+
+3. **WebSocket Gateway** (`scripts/soroban-event-gateway.mjs`): Node.js WebSocket server for real-time event broadcasting to frontend clients. Supports multi-contract monitoring with independent polling and health check endpoints.
+
+### Event Indexer Integration
+
+The event indexer integrates with the Web3Context for Stellar ecosystem:
+- Automatically starts when connecting to Stellar in Web3Context
+- Subscribes to contract events (VaultCreated, GuardianAdded, AccessRequested)
+- Broadcasts events to subscribers via WebSocket relay when configured
+- Provides statistics API for monitoring indexer health
+
+### Configuration
+
+Event indexer is configured via environment variables (see `.env.example`):
+- `VITE_SOROBAN_EVENT_RELAY_URL`: WebSocket relay URL for real-time event broadcasting
+- Gateway server configuration: `SOROBAN_RPC_URL`, `SOROBAN_CONTRACT_IDS`, `WS_PORT`, `POLL_INTERVAL_MS`, etc.
+
+### Performance Characteristics
+
+- **Frontend UI updates**: <500ms upon contract event emission (when using WebSocket relay)
+- **RPC polling**: 250ms default interval (configurable)
+- **IndexedDB queries**: <10ms for topic-based queries
+- **Exponential backoff**: 500ms initial delay, 30s maximum, 2x backoff factor
+
+### Security Properties
+
+- **WebSocket Security**: Supports wss:// for production deployments
+- **RPC Security**: Uses HTTPS endpoints, validates contract IDs
+- **Data Privacy**: IndexedDB data stored locally, no sensitive data transmitted
+
+See `docs/SOROBAN_EVENT_INDEXER.md` for detailed event indexer architecture and usage documentation.
+
+---
+
+## 8. Read-Call Caching
 
 `contract.service.ts` caches the results of read-only view calls (`hasActiveAccess`, `getVault`) for a 10-second TTL, keyed by their arguments (document/vault/user), with concurrent duplicate calls deduped into a single underlying request. This avoids re-issuing the same RPC call on every page navigation or component remount. Write actions that change cached state (e.g. `approveAccess`, `acceptGuardianInvite`, `burnAccessToken`) invalidate the relevant cache entries immediately, and `contractService.clear()` resets the cache on wallet disconnect. See `src/utils/ttlCache.ts` for the generic cache implementation.
 
 The Stellar/Soroban path currently has no real RPC calls (reads are `localStorage`-backed mocks pending real Soroban integration — see the `// TODO (Contributor)` markers in `stellar.service.ts`), so this caching layer reduces real RPC volume only on the Avalanche path today. It is wired at the ecosystem-agnostic `proxied*` layer so it applies automatically once real Soroban reads are implemented.
+
+---
+
+## 6. Windowed List Rendering (Document, Access Pass & Audit Log Lists)
+
+`Documents.tsx`, `NFTGallery.tsx`, and `AuditLogTimeline.tsx` render potentially large lists (uploaded documents, minted access passes, vault activity events) that previously mounted every item to the DOM unconditionally, causing scroll jank as a vault's item/event count grows.
+
+These components window the DOM using [`@tanstack/react-virtual`](https://tanstack.com/virtual/latest):
+
+- `src/components/documents/VirtualizedDocumentsList.tsx` — windows the document table body. The table markup itself is a CSS-grid of `role="table"/"row"/"cell"` divs rather than a native `<table>`, because native table rows can't be absolutely positioned for windowing without breaking column alignment (see decision rationale in PR #45).
+- `src/components/nft/VirtualizedNftGrid.tsx` — windows the access-pass card grid by chunking tokens into rows matching the current responsive column count (1/2/3 columns) and virtualizing rows of cards.
+- `src/components/audit/AuditLogTimeline.tsx` — windows the vault activity timeline directly (it's already a presentational, props-driven list component, so no separate `Virtualized*` wrapper was needed). The timeline's connecting rail (`before:*` pseudo-element) is drawn against the virtualizer's total scroll height rather than natural content flow, so it still spans the full list once scrolled.
+
+All three components use `useVirtualizer`'s `measureElement` for dynamic per-row sizing (rather than a single fixed row height), since row/card content height varies with wrapped text and action-button counts. Only rows within the viewport plus a small overscan are ever mounted to the DOM, regardless of total list length — verified in `src/__tests__/VirtualizedDocumentsList.test.tsx`, `VirtualizedNftGrid.test.tsx`, and `AuditLogTimeline.test.tsx` with lists up to 10,000 items, asserting the mounted node count stays under 50.
+
+`@tanstack/react-virtual` was already present in `package-lock.json` as a transitive dependency of `@heroui/react`'s internal `Table`/`Listbox` virtualization (HeroUI's own `<Table isVirtualized>` uses it internally) — it is now also a direct dependency, pinned to the same locked version, since all three call it directly.

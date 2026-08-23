@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -53,9 +54,18 @@ export default defineConfig({
     sourcemap: true,
     chunkSizeWarningLimit: 900,
     rollupOptions: {
+      input: {
+        main: 'index.html',
+        'service-worker': 'src/sw.ts',
+      },
       output: {
         manualChunks: getVendorChunk,
+        entryFileNames: (chunkInfo) =>
+          chunkInfo.name === 'service-worker' ? 'sw.js' : 'assets/[name]-[hash].js',
       },
     },
+  },
+  test: {
+    pool: 'threads',
   }
 })
