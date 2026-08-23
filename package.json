@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:contracts": "npx hardhat test --config hardhat.config.cjs",
     "test:stellar": "cd contracts-stellar && cargo test",
+    "test:stellar:coverage": "cd contracts-stellar && cargo tarpaulin --engine llvm --out Html --output-dir ../coverage --exclude-files 'src/test.rs'",
     "test:smoke": "node scripts/smoke-check.mjs",
     "test:baseline": "node scripts/test-baseline.mjs",
     "test:sss": "node scripts/test-sss.mjs",
@@ -18,7 +19,8 @@
     "e2e:install": "npx playwright install chromium && HEADLESS=true npx @synthetixio/synpress@4.1.2 e2e/wallet-setup",
     "e2e:evm": "HEADLESS=true npx playwright test",
     "e2e:stellar": "node e2e/soroban/soroban-flow.test.mjs",
-    "proxy:pinata": "node scripts/pinata-proxy.mjs"
+    "proxy:pinata": "node scripts/pinata-proxy.mjs",
+    "gateway:soroban": "node scripts/soroban-event-gateway.mjs"
   },
   "dependencies": {
     "@heroui/react": "^2.0.0",
@@ -31,6 +33,7 @@
     "axios": "^1.6.0",
     "crypto-js": "^4.2.0",
     "date-fns": "^3.6.0",
+    "dotenv": "^16.3.1",
     "ethers": "^6.13.0",
     "framer-motion": "^11.5.6",
     "mlkem": "^2.7.0",
@@ -41,6 +44,7 @@
     "react-router-dom": "^6.20.0",
     "tweetnacl": "^1.0.3",
     "web3.storage": "^4.5.5",
+    "ws": "^8.14.2",
     "zustand": "^4.5.0"
   },
   "devDependencies": {

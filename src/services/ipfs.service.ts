@@ -1,6 +1,7 @@
 import axios from "axios";
 import { ipfsGateway } from "./ipfsGateway";
 import { signProxyRequest } from "../utils/ipfsProxySignature";
+import { pirService } from "./pir.service";
 
 const PINATA_API_URL =
   import.meta.env.VITE_IPFS_API_URL || "https://api.pinata.cloud";
@@ -31,6 +32,31 @@ const getURL = (hash: string): string => ipfsGateway.getURL(hash);
 
 const fetchFile = (hash: string, init?: RequestInit): Promise<Response> =>
   ipfsGateway.fetchFile(hash, init);
+
+/**
+ * Fetch a file from IPFS using PIR (Private Information Retrieval) if enabled.
+ * This obscures which document is being fetched by batching with dummy queries
+ * and optionally routing through Tor.
+ */
+const fetchFileWithPIR = async (
+  hash: string,
+  init?: RequestInit
+): Promise<Response> => {
+  const pirResult = await pirService.fetchDocument(hash, init?.signal || undefined);
+  
+  if (!pirResult.success) {
+    throw new Error(pirResult.error || "PIR fetch failed");
+  }
+  
+  // Convert ArrayBuffer back to a Response-like object
+  return new Response(pirResult.data, {
+    status: 200,
+    statusText: "OK",
+    headers: {
+      "Content-Type": "application/octet-stream",
+    },
+  });
+};
 
 const getGatewayPool = (): string[] => ipfsGateway.getGatewayPool();
 
@@ -277,6 +303,7 @@ export const ipfsService = {
   isConfigured,
   getURL,
   fetchFile,
+  fetchFileWithPIR,
   getGatewayPool,
   uploadFile,
   uploadStream,
