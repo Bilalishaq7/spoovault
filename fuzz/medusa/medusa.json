@@ -8,7 +8,7 @@
     "callSequenceLength": 64,
     "pruneFrequency": 5,
     "corpusDirectory": "corpus",
-    "coverageEnabled": false,
+    "coverageEnabled": true,
     "coverageFormats": [],
     "revertReporterEnabled": false,
     "targetContracts": ["SpooVaultFuzz"],

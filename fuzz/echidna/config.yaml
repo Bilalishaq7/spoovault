@@ -3,6 +3,7 @@ testLimit: 5000
 seqLen: 100
 corpusDir: "/tmp/echidna-corpus"
 coverage: false
+codeSize: 0xffffff
 # Echidna will only attempt to break `echidna_*` properties.
 format: text
 # Stop early if a property is violated.
