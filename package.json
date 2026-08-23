@@ -91,6 +91,6 @@
     "typechain": "^8.3.0",
     "typescript": "^5.0.2",
     "vite": "^5.0.0",
-    "vitest": "^4.1.10"
+    "vitest": "^2.1.9"
   }
 }
