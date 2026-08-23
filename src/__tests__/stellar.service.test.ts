@@ -138,18 +138,18 @@ describe('invokeSorobanContract', () => {
     (freighter.isConnected as any).mockResolvedValue(false);
 
     await expect(
-      stellarService.invokeSorobanContract('create_vault', [])
+      (stellarService as any).invokeSorobanContract('create_vault', [])
     ).rejects.toThrow('Freighter not connected');
   });
 
   it('should return decoded value for readonly calls', async () => {
-    const result = await stellarService.invokeSorobanContract('get_vault', [], { readonly: true });
+    const result = await (stellarService as any).invokeSorobanContract('get_vault', [], { readonly: true });
     expect(result).toBe('decoded-value');
     expect(sdk.scValToNative).toHaveBeenCalled();
   });
 
   it('should complete a mutating transaction successfully', async () => {
-    const result = await stellarService.invokeSorobanContract('create_vault', []);
+    const result = await (stellarService as any).invokeSorobanContract('create_vault', []);
     expect(result).toBe('decoded-value');
     expect(freighter.signTransaction).toHaveBeenCalled();
   });

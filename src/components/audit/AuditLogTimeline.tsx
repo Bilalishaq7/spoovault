@@ -1,4 +1,5 @@
-import React from "react";
+import React, { useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   FiClock,
   FiFileText,
@@ -20,6 +21,8 @@ import { auditService } from "../../services/audit.service";
 import { getExplorerTxUrl } from "../../utils/explorer";
 import { toast } from "react-hot-toast";
 
+const AUDIT_ROW_ESTIMATED_HEIGHT = 100;
+
 export interface AuditLogTimelineProps {
   vault?: VaultData;
   documents?: DocumentData[];
@@ -31,6 +34,14 @@ export const AuditLogTimeline: React.FC<AuditLogTimelineProps> = ({
   documents = [],
   activities,
 }) => {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: activities.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => AUDIT_ROW_ESTIMATED_HEIGHT,
+    overscan: 6,
+  });
+
   const handleExportJSON = () => {
     if (!vault) {
       toast.error("Select a vault to export certificate");
@@ -97,12 +108,35 @@ export const AuditLogTimeline: React.FC<AuditLogTimelineProps> = ({
           No activity logs recorded yet.
         </div>
       ) : (
-        <div className="relative pl-6 space-y-6 before:absolute before:left-2.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-800">
-          {activities.map((act, idx) => (
-            <div key={idx} className="relative group">
-              <div className="absolute -left-6 top-0.5 w-5 h-5 rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center shadow-md">
-                {getEventIcon(act.action)}
-              </div>
+        <div
+          ref={scrollRef}
+          data-testid="audit-log-scroll-container"
+          className="max-h-[36rem] overflow-auto"
+        >
+          <div
+            className="relative pl-6 before:absolute before:left-2.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-800"
+            style={{ height: rowVirtualizer.getTotalSize() }}
+          >
+            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+              const act = activities[virtualRow.index];
+              return (
+                <div
+                  key={virtualRow.index}
+                  ref={rowVirtualizer.measureElement}
+                  data-index={virtualRow.index}
+                  data-testid="audit-log-row"
+                  className="relative group pb-6"
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
+                >
+                  <div className="absolute -left-6 top-0.5 w-5 h-5 rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center shadow-md">
+                    {getEventIcon(act.action)}
+                  </div>
 
               <div className="bg-slate-800/40 hover:bg-slate-800/70 border border-slate-700/50 rounded-lg p-3.5 transition-all">
                 <div className="flex items-center justify-between">
@@ -139,9 +173,9 @@ export const AuditLogTimeline: React.FC<AuditLogTimelineProps> = ({
                     </span>
                   </div>
                 </div>
-              </div>
-            </div>
-          ))}
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

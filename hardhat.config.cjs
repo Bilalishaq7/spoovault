@@ -27,6 +27,9 @@ module.exports = {
     showMethodSig: false,
   },
   networks: {
+    hardhat: {
+      allowUnlimitedContractSize: true,
+    },
     fuji: {
       url:
         process.env.VITE_AVALANCHE_RPC ||

@@ -396,3 +396,262 @@ fn test_deep_auth_invocation_notifies_access_registry() {
     });
     assert_eq!(recorded, (doc_id, requester));
 }
+
+#[test]
+fn test_guardian_revoke_access() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SpooVaultStellar);
+    let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let requester = Address::generate(&env);
+    env.mock_all_auths();
+
+    let vault_id = client.create_vault(
+        &creator,
+        &String::from_str(&env, "Revoke Vault"),
+        &String::from_str(&env, "Guardian revoke test"),
+        &vec![&env, Address::generate(&env)],
+        &1,
+    );
+    let doc_id = client.add_document(
+        &creator,
+        &vault_id,
+        &String::from_str(&env, "meta"),
+        &String::from_str(&env, "QmHash"),
+        &AccessLevel::Read,
+        &ReleaseCondition::Anytime,
+        &vec![&env, creator.clone()],
+        &vec![&env, String::from_str(&env, "share")],
+    );
+    let req_id = client.request_access(&requester, &doc_id);
+    client.approve_access(&creator, &req_id, &None);
+
+    let req = client.get_access_request(&req_id).unwrap();
+    assert_eq!(req.status, RequestStatus::Approved);
+
+    client.revoke_access(&creator, &doc_id, &requester);
+
+    // A fresh request is accepted again only because access was actually
+    // cleared - `request_access` panics if `HasAccess` is still true.
+    let req_id_2 = client.request_access(&requester, &doc_id);
+    assert_ne!(req_id_2, req_id);
+}
+
+#[cfg(test)]
+mod cross_chain_revocation {
+    use super::*;
+    use k256::ecdsa::signature::hazmat::PrehashSigner;
+    use k256::ecdsa::SigningKey as EvmSigningKey;
+    use soroban_sdk::xdr::ToXdr;
+
+    struct EvmKeypair {
+        signing_key: EvmSigningKey,
+        address: BytesN<20>,
+    }
+
+    fn generate_evm_keypair(env: &Env, seed: u8) -> EvmKeypair {
+        let signing_key = EvmSigningKey::from_bytes(&[seed; 32].into()).unwrap();
+        let pk65: [u8; 65] = signing_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        // Ethereum address = keccak256(pubkey without the 0x04 prefix byte)[12..32].
+        let pk_hash = env
+            .crypto()
+            .keccak256(&Bytes::from_array(env, &pk65).slice(1..65));
+        let hash_bytes: Bytes = pk_hash.to_bytes().into();
+        let address: BytesN<20> = hash_bytes.slice(12..32).try_into().unwrap();
+        EvmKeypair { signing_key, address }
+    }
+
+    /// Builds the exact digest `recover_eth_address` verifies against (using
+    /// the same `env.crypto()` host hash functions the contract itself
+    /// uses, so there is no risk of a hand-rolled hash mismatching), then
+    /// produces a real secp256k1 signature plus the recovery id that
+    /// reproduces the signer's public key.
+    #[allow(clippy::too_many_arguments)]
+    fn sign_revocation(
+        env: &Env,
+        signer: &EvmSigningKey,
+        vault_gid: &BytesN<32>,
+        document_id: u64,
+        target_evm_user: &BytesN<20>,
+        target_stellar_user: &Address,
+        nonce: u64,
+    ) -> (BytesN<64>, u32) {
+        let mut payload = Bytes::from_slice(env, b"RevokeAccess");
+        payload.append(&Bytes::from(vault_gid.clone()));
+        payload.append(&Bytes::from_array(env, &u256_be(document_id)));
+        payload.append(&Bytes::from(target_evm_user.clone()));
+        payload.append(&target_stellar_user.clone().to_xdr(env));
+        payload.append(&Bytes::from_array(env, &u256_be(nonce)));
+        let message_hash = env.crypto().keccak256(&payload);
+
+        let mut prefixed = Bytes::from_slice(env, b"\x19Ethereum Signed Message:\n32");
+        prefixed.append(&Bytes::from(message_hash.to_bytes()));
+        let digest = env.crypto().keccak256(&prefixed);
+        let digest_arr: [u8; 32] = digest.to_bytes().to_array();
+
+        let sig: k256::ecdsa::Signature = signer.sign_prehash(&digest_arr).unwrap();
+        let sig_arr: [u8; 64] = sig.to_bytes()[..].try_into().unwrap();
+        let sig_bn = BytesN::from_array(env, &sig_arr);
+
+        let expected_pk: [u8; 65] = signer
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        let mut recovery_id = 0u32;
+        for rid in 0..4u32 {
+            let recovered: [u8; 65] = env.crypto().secp256k1_recover(&digest, &sig_bn, rid).to_array();
+            if recovered == expected_pk {
+                recovery_id = rid;
+                break;
+            }
+        }
+
+        (sig_bn, recovery_id)
+    }
+
+    fn setup_linked_vault(env: &Env) -> (SpooVaultStellarClient<'static>, Address, u64, u64, EvmKeypair, BytesN<32>) {
+        let contract_id = env.register_contract(None, SpooVaultStellar);
+        let client = SpooVaultStellarClient::new(env, &contract_id);
+
+        let creator = Address::generate(env);
+        let requester = Address::generate(env);
+        env.mock_all_auths();
+
+        let vault_id = client.create_vault(
+            &creator,
+            &String::from_str(env, "Cross-Chain Vault"),
+            &String::from_str(env, "Revocation broadcast test"),
+            &vec![env, Address::generate(env)],
+            &1,
+        );
+        let doc_id = client.add_document(
+            &creator,
+            &vault_id,
+            &String::from_str(env, "meta"),
+            &String::from_str(env, "QmHash"),
+            &AccessLevel::Read,
+            &ReleaseCondition::Anytime,
+            &vec![env, creator.clone()],
+            &vec![env, String::from_str(env, "share")],
+        );
+        let req_id = client.request_access(&requester, &doc_id);
+        client.approve_access(&creator, &req_id, &None);
+
+        let evm_keys = generate_evm_keypair(env, 42);
+        let vault_gid = BytesN::from_array(env, &[9u8; 32]);
+        client.link_cross_chain_vault(&creator, &vault_id, &vault_gid, &evm_keys.address);
+
+        (client, requester, vault_id, doc_id, evm_keys, vault_gid)
+    }
+
+    #[test]
+    fn test_relay_revoke_access_applies_evm_signed_revocation() {
+        let env = Env::default();
+        let (client, requester, _vault_id, doc_id, evm_keys, vault_gid) = setup_linked_vault(&env);
+
+        assert!(client.get_document(&doc_id).is_some());
+
+        let nonce = 1u64;
+        let (sig, recovery_id) = sign_revocation(
+            &env,
+            &evm_keys.signing_key,
+            &vault_gid,
+            doc_id,
+            &evm_keys.address,
+            &requester,
+            nonce,
+        );
+
+        client.relay_revoke_access(
+            &vault_gid,
+            &doc_id,
+            &evm_keys.address,
+            &requester,
+            &nonce,
+            &sig,
+            &recovery_id,
+        );
+
+        // Access was actually cleared: a fresh request now succeeds instead
+        // of panicking on "Already has access".
+        let new_req_id = client.request_access(&requester, &doc_id);
+        assert!(new_req_id > 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Stale or replayed revocation nonce")]
+    fn test_relay_revoke_access_rejects_replayed_nonce() {
+        let env = Env::default();
+        let (client, requester, _vault_id, doc_id, evm_keys, vault_gid) = setup_linked_vault(&env);
+
+        let nonce = 1u64;
+        let (sig, recovery_id) = sign_revocation(
+            &env,
+            &evm_keys.signing_key,
+            &vault_gid,
+            doc_id,
+            &evm_keys.address,
+            &requester,
+            nonce,
+        );
+
+        client.relay_revoke_access(
+            &vault_gid,
+            &doc_id,
+            &evm_keys.address,
+            &requester,
+            &nonce,
+            &sig,
+            &recovery_id,
+        );
+        // Replaying the exact same signed message must be rejected.
+        client.relay_revoke_access(
+            &vault_gid,
+            &doc_id,
+            &evm_keys.address,
+            &requester,
+            &nonce,
+            &sig,
+            &recovery_id,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Signature not from linked cross-chain revoker")]
+    fn test_relay_revoke_access_rejects_unauthorized_signer() {
+        let env = Env::default();
+        let (client, requester, _vault_id, doc_id, _evm_keys, vault_gid) = setup_linked_vault(&env);
+
+        // A different EVM key signs the same payload - not the vault's
+        // registered cross-chain revoker.
+        let attacker_keys = generate_evm_keypair(&env, 99);
+        let nonce = 1u64;
+        let (sig, recovery_id) = sign_revocation(
+            &env,
+            &attacker_keys.signing_key,
+            &vault_gid,
+            doc_id,
+            &attacker_keys.address,
+            &requester,
+            nonce,
+        );
+
+        client.relay_revoke_access(
+            &vault_gid,
+            &doc_id,
+            &attacker_keys.address,
+            &requester,
+            &nonce,
+            &sig,
+            &recovery_id,
+        );
+    }
+}

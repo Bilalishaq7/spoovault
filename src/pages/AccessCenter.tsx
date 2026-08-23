@@ -701,14 +701,14 @@ const AccessCenter = () => {
       throw new Error("Empty response received from IPFS");
     }
 
-    const { isStreaming, stream } = await detectStreamingCiphertext(response.body);
+    const { isStreaming, stream } = await detectStreamingCiphertext(response.body as any);
     const metadata = decryptMetadata(doc);
     const name = metadata?.name || `document-${doc.id}`;
     const type = metadata?.type || "application/octet-stream";
 
-    if (isStreaming) {
+    if (isStreaming && stream) {
       const cryptoKey = await importStreamingKey(key);
-      const decrypted = decryptStream(stream, cryptoKey);
+      const decrypted = decryptStream(stream as any, cryptoKey);
       return { mode: "streaming" as const, decrypted, name, type };
     }
 

@@ -5,8 +5,18 @@
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contractimpl, contracttype, Address, Env, IntoVal, String, Symbol, Val, Vec,
+    contract, contractimpl, contracttype,
+    xdr::ToXdr,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
+
+/// Zero-pads a `u64` into a 32-byte big-endian word, matching how Solidity's
+/// `abi.encodePacked` serializes a `uint256`.
+fn u256_be(value: u64) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[24..32].copy_from_slice(&value.to_be_bytes());
+    buf
+}
 
 /// Ledger constants for TTL extension thresholds and bump amounts (~5s per ledger)
 /// ~7 days = 120,960 ledgers
@@ -123,6 +133,10 @@ pub enum DataKey {
     EvmToStellar(String),
     StellarToEvm(Address),
     EvmToPubKey(String),
+    // Cross-Chain Revocation Broadcast Engine
+    VaultGid(BytesN<32>),
+    CrossChainRevoker(u64),
+    RevocationNonce(BytesN<32>, u64, Address),
 }
 
 #[contract]
@@ -740,6 +754,139 @@ impl SpooVaultStellar {
         Self::bump_persistent(&env, &registry_key);
     }
 
+    /// Revoke a beneficiary's access to a document. Guardian-only, same-chain
+    /// counterpart to the EVM contract's `revokeAccess`.
+    pub fn revoke_access(env: Env, guardian: Address, document_id: u64, target: Address) {
+        guardian.require_auth();
+        Self::bump_instance(&env);
+
+        let doc_key = DataKey::Doc(document_id);
+        let doc: Document = env
+            .storage()
+            .persistent()
+            .get(&doc_key)
+            .expect("Document not found");
+
+        let is_guard: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IsGuardian(doc.vault_id, guardian))
+            .unwrap_or(false);
+        assert!(is_guard, "Only guardians can revoke access");
+
+        Self::apply_revocation(&env, document_id, &target);
+    }
+
+    /// Link this Soroban vault to its EVM counterpart so cross-chain
+    /// revocation broadcasts can be routed here: `vault_gid` is the globally
+    /// unique id the EVM contract derives via `vaultGID(vaultId)`, and
+    /// `evm_revoker` is the EVM address (typically an EVM-side guardian's
+    /// EOA) authorized to sign revocation broadcasts for this vault.
+    pub fn link_cross_chain_vault(
+        env: Env,
+        owner: Address,
+        vault_id: u64,
+        vault_gid: BytesN<32>,
+        evm_revoker: BytesN<20>,
+    ) {
+        owner.require_auth();
+        Self::bump_instance(&env);
+
+        let vault_key = DataKey::Vault(vault_id);
+        let vault: Vault = env
+            .storage()
+            .persistent()
+            .get(&vault_key)
+            .expect("Vault not found");
+        assert!(vault.creator == owner, "Only creator can link cross-chain vault");
+
+        let gid_key = DataKey::VaultGid(vault_gid);
+        assert!(
+            !env.storage().persistent().has(&gid_key),
+            "vault_gid already linked to a vault"
+        );
+        env.storage().persistent().set(&gid_key, &vault_id);
+        Self::bump_persistent(&env, &gid_key);
+
+        let revoker_key = DataKey::CrossChainRevoker(vault_id);
+        env.storage().persistent().set(&revoker_key, &evm_revoker);
+        Self::bump_persistent(&env, &revoker_key);
+    }
+
+    /// Apply an EVM-originated access revocation broadcast to this vault's
+    /// Soroban-side access grant, within the same Soroban ledger the call
+    /// lands in - closing the window where a beneficiary revoked on EVM
+    /// could still fetch document shares here.
+    ///
+    /// Trust model: the call is permissionless (anyone may relay it, like
+    /// forwarding any signed message), but it only takes effect if
+    /// `signature` recovers to the EVM address registered via
+    /// `link_cross_chain_vault` as this vault's authorized cross-chain
+    /// revoker. The signed digest commits to every argument below (including
+    /// `target_stellar_user`, resolved off-chain before the EVM guardian
+    /// signs), so a relayer cannot redirect a validly-signed message to a
+    /// different beneficiary or vault. `nonce` must strictly increase per
+    /// (vault_gid, document, beneficiary) triple, blocking replay - scoping
+    /// by `vault_gid` rather than just document/beneficiary means that if the
+    /// EVM contract is ever redeployed to a new address (and thus a new
+    /// `vaultGID`, since it is derived from `address(this)`) and re-linked,
+    /// nonce tracking starts fresh instead of being stuck behind whatever
+    /// nonce the previous deployment last used.
+    pub fn relay_revoke_access(
+        env: Env,
+        vault_gid: BytesN<32>,
+        document_id: u64,
+        target_evm_user: BytesN<20>,
+        target_stellar_user: Address,
+        nonce: u64,
+        signature: BytesN<64>,
+        recovery_id: u32,
+    ) {
+        Self::bump_instance(&env);
+
+        let vault_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultGid(vault_gid.clone()))
+            .expect("Unknown vault_gid");
+
+        let doc_key = DataKey::Doc(document_id);
+        let doc: Document = env
+            .storage()
+            .persistent()
+            .get(&doc_key)
+            .expect("Document not found");
+        assert!(doc.vault_id == vault_id, "Document does not belong to linked vault");
+
+        let nonce_key =
+            DataKey::RevocationNonce(vault_gid.clone(), document_id, target_stellar_user.clone());
+        let last_nonce: u64 = env.storage().persistent().get(&nonce_key).unwrap_or(0);
+        assert!(nonce > last_nonce, "Stale or replayed revocation nonce");
+
+        let revoker: BytesN<20> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CrossChainRevoker(vault_id))
+            .expect("No cross-chain revoker linked for this vault");
+
+        let recovered = Self::recover_eth_address(
+            &env,
+            &vault_gid,
+            document_id,
+            &target_evm_user,
+            &target_stellar_user,
+            nonce,
+            &signature,
+            recovery_id,
+        );
+        assert!(recovered == revoker, "Signature not from linked cross-chain revoker");
+
+        env.storage().persistent().set(&nonce_key, &nonce);
+        Self::bump_persistent(&env, &nonce_key);
+
+        Self::apply_revocation(&env, document_id, &target_stellar_user);
+    }
+
     /// Helper function to check if release condition is satisfied
     pub fn is_release_condition_satisfied(
         env: &Env,
@@ -851,6 +998,59 @@ impl SpooVaultStellar {
         ]);
 
         let _: Val = env.invoke_contract(registry, &fn_name, args);
+    }
+
+    /// Clear a beneficiary's access grant for a document. Shared by the
+    /// guardian-initiated `revoke_access` and the cross-chain
+    /// `relay_revoke_access` so both paths apply the exact same effect.
+    fn apply_revocation(env: &Env, document_id: u64, target: &Address) {
+        let acc_key = DataKey::HasAccess(document_id, target.clone());
+        let lvl_key = DataKey::AccessLvl(document_id, target.clone());
+        env.storage().persistent().set(&acc_key, &false);
+        env.storage().persistent().remove(&lvl_key);
+        Self::bump_persistent(env, &acc_key);
+
+        env.events().publish(
+            (Symbol::new(env, "access_revoked"), document_id),
+            target.clone(),
+        );
+    }
+
+    /// Recover the EVM (Ethereum-style) address that produced `signature`
+    /// over the EIP-191-prefixed cross-chain revocation payload
+    /// `("RevokeAccess", vault_gid, document_id, target_evm_user,
+    /// target_stellar_user, nonce)`. `document_id` and `nonce` are packed as
+    /// 32-byte big-endian words to match Solidity's `abi.encodePacked` of a
+    /// `uint256`, and `target_stellar_user` is committed via its canonical
+    /// XDR encoding.
+    fn recover_eth_address(
+        env: &Env,
+        vault_gid: &BytesN<32>,
+        document_id: u64,
+        target_evm_user: &BytesN<20>,
+        target_stellar_user: &Address,
+        nonce: u64,
+        signature: &BytesN<64>,
+        recovery_id: u32,
+    ) -> BytesN<20> {
+        let mut payload = Bytes::from_slice(env, b"RevokeAccess");
+        payload.append(&Bytes::from(vault_gid.clone()));
+        payload.append(&Bytes::from_array(env, &u256_be(document_id)));
+        payload.append(&Bytes::from(target_evm_user.clone()));
+        payload.append(&target_stellar_user.clone().to_xdr(env));
+        payload.append(&Bytes::from_array(env, &u256_be(nonce)));
+
+        let message_hash = env.crypto().keccak256(&payload);
+
+        let mut prefixed = Bytes::from_slice(env, b"\x19Ethereum Signed Message:\n32");
+        prefixed.append(&Bytes::from(message_hash.to_bytes()));
+        let digest = env.crypto().keccak256(&prefixed);
+
+        let pubkey = env.crypto().secp256k1_recover(&digest, signature, recovery_id);
+        let pubkey_bytes: Bytes = pubkey.into();
+        let addr_hash = env.crypto().keccak256(&pubkey_bytes.slice(1..65));
+        let addr_bytes: Bytes = addr_hash.to_bytes().into();
+        BytesN::try_from(addr_bytes.slice(12..32)).unwrap()
     }
 
     // Helper functions for TTL management

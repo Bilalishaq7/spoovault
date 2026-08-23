@@ -697,9 +697,10 @@ export const clientKeyringService = {
         : null;
 
     const existing = await idbGet(normalized);
-    const updatedRecord = await persistKeyPair(normalized, publicKey, privateKey, pinOrPassphrase, existing);
+    await persistKeyPair(normalized, publicKey, privateKey, pinOrPassphrase, existing);
+    const updatedRecord = await idbGet(normalized);
 
-    if (passkey) {
+    if (passkey && updatedRecord) {
       updatedRecord.hasPasskey = true;
       updatedRecord.passkeyCredentialId = passkey.credentialId;
       updatedRecord.passkeyPrfSalt = passkey.prfSalt;
