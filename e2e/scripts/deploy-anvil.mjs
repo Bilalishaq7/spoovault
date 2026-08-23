@@ -2,28 +2,23 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { execSync } from "node:child_process";
-import { JsonRpcProvider, Wallet, ContractFactory } from "ethers";
+import { JsonRpcProvider, Wallet, HDNodeWallet, ContractFactory } from "ethers";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..", "..");
 
 const TEST_MNEMONIC =
   "test test test test test test test test test test test junk";
-const DEPLOYER_PRIVATE_KEY = Wallet.fromPhrase(
-  TEST_MNEMONIC,
-  "",
-  "m/44'/60'/0'/0/0",
-).privateKey;
-const GUARDIAN_ADDRESS = Wallet.fromPhrase(
-  TEST_MNEMONIC,
-  "",
-  "m/44'/60'/0'/0/1",
-).address;
-const BENEFICIARY_ADDRESS = Wallet.fromPhrase(
-  TEST_MNEMONIC,
-  "",
-  "m/44'/60'/0'/0/2",
-).address;
+
+// NOTE: ethers v6 dropped the path argument from Wallet.fromPhrase; use
+// HDNodeWallet.fromPhrase(mnemonic, password, path) to derive non-default
+// accounts deterministically.
+const accountAt = (index) =>
+  HDNodeWallet.fromPhrase(TEST_MNEMONIC, "", `m/44'/60'/0'/0/${index}`);
+
+const DEPLOYER_PRIVATE_KEY = accountAt(0).privateKey;
+const GUARDIAN_ADDRESS = accountAt(1).address;
+const BENEFICIARY_ADDRESS = accountAt(2).address;
 
 const RPC_URL = process.env.ANVIL_RPC_URL || "http://localhost:8545";
 const CHAIN_ID = Number(process.env.E2E_CHAIN_ID || 43113);

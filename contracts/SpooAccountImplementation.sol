@@ -1,119 +1,197 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import "@openzeppelin/contracts/interfaces/IERC1271.sol";
-import "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
-import "@openzeppelin/contracts/token/ERC1155/IERC1155Receiver.sol";
-import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
-import "./interfaces/IERC6551Account.sol";
+import "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
+import "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
+
+/**
+ * @dev Minimal interface for reading TBA context from {ERC6551Registry}.
+ */
+interface IERC6551RegistryContext {
+    function accountContext(address tbaAddress)
+        external
+        view
+        returns (
+            uint256 chainId,
+            address tokenContract,
+            uint256 tokenId,
+            uint256 salt
+        );
+}
 
 /**
  * @title SpooAccountImplementation
- * @dev ERC-6551 Token Bound Account implementation for SpooVault
+ * @dev ERC-6551 Token Bound Account (TBA) logic contract for SpooVault NFTs.
+ *
+ *      Each SpooVault Access Token (SPVT) NFT deployed through {SpooVault} can
+ *      be bound to its own smart-contract wallet via {ERC6551Registry}.  This
+ *      contract acts as the *implementation* that every minimal ERC-1167 proxy
+ *      delegates to.
+ *
+ *      Context resolution
+ *      ──────────────────
+ *      The bound NFT triple (chainId, tokenContract, tokenId) is stored in the
+ *      registry at deployment time and retrieved via `accountContext(address(this))`.
+ *      The registry address is passed once at construction and stored in an
+ *      immutable so it is baked into every proxy's delegatecall targets.
+ *
+ *      Capabilities
+ *      ────────────
+ *      • executeCall  — the NFT owner forwards arbitrary contract calls from
+ *        the TBA address (e.g. approve document access, transfer sub-tokens).
+ *      • Receive ETH & tokens — the TBA natively holds ETH, ERC-721, ERC-1155.
+ *      • state()  — monotonically-increasing nonce; increments per execution.
+ *      • token()  — returns (chainId, tokenContract, tokenId) of the bound NFT.
+ *      • owner()  — live ERC-721 owner query; updates instantly on transfer.
+ *
+ *      Security model
+ *      ──────────────
+ *      Only the current ERC-721 owner of the bound NFT may call `executeCall`.
+ *      A simple boolean re-entrancy guard prevents nested calls.
  */
-contract SpooAccountImplementation is IERC165, IERC1271, IERC6551Account, IERC721Receiver, IERC1155Receiver {
-    uint256 private _state;
+contract SpooAccountImplementation is ERC721Holder, ERC1155Holder {
 
-    error NotAuthorized();
-    error CallFailed();
+    // ─── Immutables ───────────────────────────────────────────────────────────
+
+    /// @notice The ERC6551Registry that deployed (and tracks context for) this TBA.
+    address public immutable registry;
+
+    // ─── Events ───────────────────────────────────────────────────────────────
+
+    /// @notice Emitted when the TBA forwards a call.
+    event Executed(
+        address indexed target,
+        uint256 value,
+        bytes data,
+        bytes result
+    );
+
+    // ─── Errors ───────────────────────────────────────────────────────────────
+
+    error NotTokenOwner();
+    error ExecutionFailed();
+    error Reentrancy();
+
+    // ─── State ────────────────────────────────────────────────────────────────
+
+    /// @dev Monotonically-increasing nonce incremented on every successful execution.
+    uint256 public state;
+
+    /// @dev Simple re-entrancy guard flag.
+    bool private _locked;
+
+    // ─── Constructor ─────────────────────────────────────────────────────────
+
+    /**
+     * @param _registry Address of the {ERC6551Registry} that stores TBA context.
+     */
+    constructor(address _registry) {
+        registry = _registry;
+    }
+
+    // ─── Modifiers ────────────────────────────────────────────────────────────
+
+    modifier onlyOwner() {
+        if (msg.sender != owner()) revert NotTokenOwner();
+        _;
+    }
+
+    modifier nonReentrant() {
+        if (_locked) revert Reentrancy();
+        _locked = true;
+        _;
+        _locked = false;
+    }
+
+    // ─── Receive ETH ─────────────────────────────────────────────────────────
 
     receive() external payable {}
 
+    // ─── Core: executeCall ────────────────────────────────────────────────────
+
+    /**
+     * @notice Executes an arbitrary call from the TBA address.
+     * @dev Only the current owner of the bound NFT may call this function.
+     *      The `state` nonce is incremented on every successful execution so
+     *      clients can detect replays after NFT transfer.
+     * @param target  Contract or EOA to call.
+     * @param value   ETH value (wei) to forward.
+     * @param data    ABI-encoded call data.
+     * @return result The raw bytes returned by the callee.
+     */
     function executeCall(
-        address to,
+        address target,
         uint256 value,
         bytes calldata data
-    ) external payable returns (bytes memory result) {
-        if (msg.sender != owner()) revert NotAuthorized();
-
-        _state++;
-
+    ) external payable onlyOwner nonReentrant returns (bytes memory result) {
+        state++;
         bool success;
-        (success, result) = to.call{value: value}(data);
-
+        (success, result) = target.call{value: value}(data);
         if (!success) {
-            assembly {
-                revert(add(result, 32), mload(result))
+            // Bubble up the revert reason if available.
+            if (result.length > 0) {
+                assembly {
+                    revert(add(result, 0x20), mload(result))
+                }
             }
+            revert ExecutionFailed();
         }
+        emit Executed(target, value, data, result);
     }
 
-    function token() public view returns (uint256, address, uint256) {
-        bytes memory footer = new bytes(0x60);
+    // ─── ERC-6551: token & owner ──────────────────────────────────────────────
 
-        assembly {
-            extcodecopy(address(), add(footer, 32), 0x4d, 0x60)
-        }
-
-        return abi.decode(footer, (uint256, address, uint256));
+    /**
+     * @notice Returns the bound NFT's identifying triple.
+     * @dev Calls `accountContext(address(this))` on the {ERC6551Registry} to
+     *      retrieve the (chainId, tokenContract, tokenId) stored at deployment.
+     *      When executed via delegatecall from the proxy, `address(this)` resolves
+     *      to the proxy address, giving the correct per-NFT context.
+     * @return chainId       Chain ID the NFT belongs to.
+     * @return tokenContract ERC-721 contract address.
+     * @return tokenId       Token ID.
+     */
+    function token()
+        public
+        view
+        returns (
+            uint256 chainId,
+            address tokenContract,
+            uint256 tokenId
+        )
+    {
+        uint256 _salt;
+        (chainId, tokenContract, tokenId, _salt) = IERC6551RegistryContext(registry)
+            .accountContext(address(this));
     }
 
+    /**
+     * @notice Returns the current owner of the bound NFT.
+     * @dev Queries `ownerOf` on the ERC-721 token contract live so ownership
+     *      changes are reflected immediately without any local state update.
+     * @return The address that owns the bound NFT.
+     */
     function owner() public view returns (address) {
-        (uint256 chainId, address tokenContract, uint256 tokenId) = token();
-        if (chainId != block.chainid) return address(0);
-
+        (, address tokenContract, uint256 tokenId) = token();
         return IERC721(tokenContract).ownerOf(tokenId);
     }
 
-    function state() external view returns (uint256) {
-        return _state;
-    }
+    // ─── ERC-165 ──────────────────────────────────────────────────────────────
 
-    function isValidSigner(address signer, bytes calldata) external view returns (bytes4) {
-        if (signer == owner()) {
-            return IERC6551Account.isValidSigner.selector;
-        }
-
-        return bytes4(0);
-    }
-
-    function isValidSignature(bytes32 hash, bytes memory signature) external view returns (bytes4 magicValue) {
-        bool isValid = SignatureChecker.isValidSignatureNow(owner(), hash, signature);
-
-        if (isValid) {
-            return IERC1271.isValidSignature.selector;
-        }
-
-        return bytes4(0);
-    }
-
-    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
-        return (
+    /**
+     * @dev Reports support for ERC-165, ERC-721 token-receiver, and
+     *      ERC-1155 token-receiver interfaces.
+     */
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(ERC1155Holder)
+        returns (bool)
+    {
+        return
             interfaceId == type(IERC165).interfaceId ||
-            interfaceId == type(IERC6551Account).interfaceId ||
-            interfaceId == type(IERC1271).interfaceId ||
-            interfaceId == type(IERC721Receiver).interfaceId ||
-            interfaceId == type(IERC1155Receiver).interfaceId
-        );
-    }
-
-    function onERC721Received(
-        address,
-        address,
-        uint256,
-        bytes calldata
-    ) external pure returns (bytes4) {
-        return IERC721Receiver.onERC721Received.selector;
-    }
-
-    function onERC1155Received(
-        address,
-        address,
-        uint256,
-        uint256,
-        bytes calldata
-    ) external pure returns (bytes4) {
-        return IERC1155Receiver.onERC1155Received.selector;
-    }
-
-    function onERC1155BatchReceived(
-        address,
-        address,
-        uint256[] calldata,
-        uint256[] calldata,
-        bytes calldata
-    ) external pure returns (bytes4) {
-        return IERC1155Receiver.onERC1155BatchReceived.selector;
+            super.supportsInterface(interfaceId);
     }
 }

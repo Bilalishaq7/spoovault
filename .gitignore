@@ -40,9 +40,16 @@ dev.log
 artifacts/
 cache/
 
+# Generated gas profiling artifacts
+gas-report.txt
+gas-benchmark.json
+gas-comparison.md
+gas-summary.json
+
 # Rust / Soroban
 target/
 contracts-stellar/target/
+contracts-stellar/test_snapshots/
 
 # Web3 E2E (Synpress / Playwright)
 .cache-synpress/
@@ -52,3 +59,6 @@ test-results/
 blob-report/
 .playwright/
 
+# Claude Code
+.claude
+CLAUDE.md
