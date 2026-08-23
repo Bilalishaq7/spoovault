@@ -1485,3 +1485,212 @@ mod upgrade_governance {
         client.migrate(&admin);
     }
 }
+
+/// Vault access tokens: SEP-41-inspired, per-vault non-fungible membership
+/// credentials (`mint_access_token` / `burn_access_token` / `transfer` /
+/// `owner_of` / `balance`), and their binding to `has_vault_token`.
+mod vault_access_tokens {
+    use super::*;
+
+    #[test]
+    fn test_mint_access_token_success() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        let holder = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://token-metadata");
+
+        let token_id = client.mint_access_token(&creator, &vault_id, &holder, &uri);
+
+        assert_eq!(token_id, 1);
+        assert_eq!(client.owner_of(&token_id), holder);
+        assert_eq!(client.balance(&holder), 1);
+        assert!(client.has_vault_token(&holder, &vault_id));
+        assert_eq!(client.get_token_vault(&token_id), vault_id);
+        assert_eq!(client.get_token_uri(&token_id), uri);
+    }
+
+    #[test]
+    fn test_mint_access_token_ids_increment_across_vaults() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        let holder_a = Address::generate(&env);
+        let holder_b = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        let first = client.mint_access_token(&creator, &vault_id, &holder_a, &uri);
+        let second = client.mint_access_token(&creator, &vault_id, &holder_b, &uri);
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only guardians can mint access tokens")]
+    fn test_mint_access_token_rejects_non_guardian() {
+        let (env, client, _creator, _g1, _g2, vault_id) = create_test_vault();
+        let not_a_guardian = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        client.mint_access_token(&not_a_guardian, &vault_id, &holder, &uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vault not active")]
+    fn test_mint_access_token_rejects_inactive_vault() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        client.deactivate_vault(&creator, &vault_id);
+
+        let holder = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+        client.mint_access_token(&creator, &vault_id, &holder, &uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vault not found")]
+    fn test_mint_access_token_rejects_nonexistent_vault() {
+        let (env, client) = setup();
+        let creator = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        client.mint_access_token(&creator, &999, &holder, &uri);
+    }
+
+    #[test]
+    fn test_transfer_moves_vault_access_to_new_holder() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        let original_holder = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        let token_id = client.mint_access_token(&creator, &vault_id, &original_holder, &uri);
+        assert!(client.has_vault_token(&original_holder, &vault_id));
+        assert!(!client.has_vault_token(&new_holder, &vault_id));
+
+        client.transfer(&original_holder, &new_holder, &token_id);
+
+        assert_eq!(client.owner_of(&token_id), new_holder);
+        assert_eq!(client.balance(&original_holder), 0);
+        assert_eq!(client.balance(&new_holder), 1);
+        assert!(!client.has_vault_token(&original_holder, &vault_id));
+        assert!(client.has_vault_token(&new_holder, &vault_id));
+    }
+
+    #[test]
+    #[should_panic(expected = "Not token owner")]
+    fn test_transfer_rejects_non_owner() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        let holder = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        let token_id = client.mint_access_token(&creator, &vault_id, &holder, &uri);
+        client.transfer(&stranger, &new_holder, &token_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Token does not exist")]
+    fn test_transfer_rejects_nonexistent_token() {
+        let (env, client) = setup();
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+
+        client.transfer(&from, &to, &999);
+    }
+
+    #[test]
+    fn test_burn_access_token_relinquishes_vault_access() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        let holder = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        let token_id = client.mint_access_token(&creator, &vault_id, &holder, &uri);
+        assert!(client.has_vault_token(&holder, &vault_id));
+
+        client.burn_access_token(&holder, &token_id);
+
+        assert_eq!(client.balance(&holder), 0);
+        assert!(!client.has_vault_token(&holder, &vault_id));
+        assert_eq!(client.get_token_vault(&token_id), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Token does not exist")]
+    fn test_owner_of_panics_after_burn() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        let holder = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        let token_id = client.mint_access_token(&creator, &vault_id, &holder, &uri);
+        client.burn_access_token(&holder, &token_id);
+        client.owner_of(&token_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not token owner")]
+    fn test_burn_access_token_rejects_non_owner() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        let holder = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        let token_id = client.mint_access_token(&creator, &vault_id, &holder, &uri);
+        client.burn_access_token(&stranger, &token_id);
+    }
+
+    #[test]
+    fn test_multiple_tokens_for_same_vault_and_holder_compose_correctly() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        let holder = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        let first = client.mint_access_token(&creator, &vault_id, &holder, &uri);
+        let second = client.mint_access_token(&creator, &vault_id, &holder, &uri);
+        assert_eq!(client.balance(&holder), 2);
+        assert!(client.has_vault_token(&holder, &vault_id));
+
+        // Burning one of two tokens must not revoke vault access - the
+        // holder still owns the other.
+        client.burn_access_token(&holder, &first);
+        assert_eq!(client.balance(&holder), 1);
+        assert!(client.has_vault_token(&holder, &vault_id));
+
+        // Burning the last one does revoke it.
+        client.burn_access_token(&holder, &second);
+        assert_eq!(client.balance(&holder), 0);
+        assert!(!client.has_vault_token(&holder, &vault_id));
+    }
+
+    #[test]
+    fn test_transfer_one_of_two_tokens_keeps_sender_access() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        let holder = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        let first = client.mint_access_token(&creator, &vault_id, &holder, &uri);
+        let _second = client.mint_access_token(&creator, &vault_id, &holder, &uri);
+
+        client.transfer(&holder, &recipient, &first);
+
+        // The sender still holds one token for this vault, so they keep
+        // vault access; the recipient now has it too.
+        assert!(client.has_vault_token(&holder, &vault_id));
+        assert!(client.has_vault_token(&recipient, &vault_id));
+        assert_eq!(client.balance(&holder), 1);
+        assert_eq!(client.balance(&recipient), 1);
+    }
+
+    #[test]
+    fn test_extend_token_ttl_does_not_panic_for_existing_or_missing_token() {
+        let (env, client, creator, _g1, _g2, vault_id) = create_test_vault();
+        let holder = Address::generate(&env);
+        let uri = String::from_str(&env, "ipfs://meta");
+
+        let token_id = client.mint_access_token(&creator, &vault_id, &holder, &uri);
+        client.extend_token_ttl(&token_id);
+        // A nonexistent token is a silent no-op, matching extend_document_ttl
+        // and extend_request_ttl's `has()`-guarded pattern.
+        client.extend_token_ttl(&999);
+    }
+}
