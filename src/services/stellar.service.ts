@@ -12,21 +12,19 @@ export interface StellarWalletChangeEvent {
   network?: string;
 }
 
-export type StellarWalletChangeListener = (
-  event: StellarWalletChangeEvent
-) => void;
+export type StellarWalletChangeListener = (event: StellarWalletChangeEvent) => void;
 
 export type StellarUnsubscribe = () => void;
 
+export interface StellarKeeperAuthorizationData {
+  keeper: string;
+  expiresAt: number;
+}
+
 const normalizeAddressValue = (value: unknown): string => {
   if (typeof value === "string") return value.trim();
-  if (value && typeof value === "object") {
-    if ("address" in value && typeof (value as { address?: unknown }).address === "string") {
-      return (value as { address: string }).address.trim();
-    }
-    if ("publicKey" in value && typeof (value as { publicKey?: unknown }).publicKey === "string") {
-      return (value as { publicKey: string }).publicKey.trim();
-    }
+  if (value && typeof (value as { address?: unknown }).address === "string") {
+    return (value as { address: string }).address.trim();
   }
   return "";
 };
@@ -46,10 +44,7 @@ export type FreighterShim = {
   isConnected: () => Promise<boolean>;
   getAddress: () => Promise<string>;
   signTransaction?: (xdr: string, opts?: any) => Promise<string>;
-  signAuthEntry?: (
-    preimageXdr: string,
-    opts?: any
-  ) => Promise<{ signedAuthEntry: string; error?: string }>;
+  signAuthEntry?: (preimageXdr: string, opts?: any) => Promise<{ signedAuthEntry: string; error?: string }>;
   signBlob?: (blob: string, opts?: any) => Promise<string>;
   getNetwork?: () => Promise<unknown>;
   listen?: (callback: (event: StellarWalletChangeEvent) => void) => unknown;
@@ -70,36 +65,28 @@ const loadFreighter = async (): Promise<FreighterShim> => {
   if (_freighter) return _freighter;
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mod = (await import("@stellar/freighter-api")) as any;
-    return {
+    const mod = await import("@stellar/freighter-api") as any;
+    _freighter = {
       isConnected: async () => {
         try {
-          const fn = mod.isConnected || mod.default?.isConnected;
-          if (typeof fn !== "function") return false;
-          const result = await fn();
-          return typeof result === "boolean"
-            ? result
-            : Boolean(result?.isConnected);
+          const result = await mod.isConnected();
+          return typeof result === "boolean" ? result : Boolean(result?.isConnected);
         } catch {
           return false;
         }
       },
       getAddress: async () => {
         try {
-          const getAddr = mod.getAddress || mod.default?.getAddress;
-          if (typeof getAddr === "function") {
-            return normalizeAddressValue(await getAddr());
+          if (typeof mod.getAddress === "function") {
+            return normalizeAddressValue(await mod.getAddress());
           }
-          const getPk = mod.getPublicKey || mod.default?.getPublicKey;
-          if (typeof getPk === "function") {
-            return normalizeAddressValue(await getPk());
+          if (typeof mod.getPublicKey === "function") {
+            return normalizeAddressValue(await mod.getPublicKey());
           }
-          const getInfo = mod.getUserInfo || mod.default?.getUserInfo;
-          if (typeof getInfo === "function") {
-            const info = await getInfo();
+          if (typeof mod.getUserInfo === "function") {
+            const info = await mod.getUserInfo();
             return normalizeAddressValue(
-              info &&
-                typeof (info as { publicKey?: unknown }).publicKey === "string"
+              info && typeof (info as { publicKey?: unknown }).publicKey === "string"
                 ? (info as { publicKey: string }).publicKey
                 : ""
             );
@@ -109,31 +96,16 @@ const loadFreighter = async (): Promise<FreighterShim> => {
           return "";
         }
       },
-      signTransaction: (xdr: string, opts?: any) => {
-        const fn = mod.signTransaction || mod.default?.signTransaction;
-        if (typeof fn === "function") return fn(xdr, opts);
-        return Promise.resolve("");
-      },
-      signAuthEntry: (preimage: string, opts?: any) => {
-        const fn = mod.signAuthEntry || mod.default?.signAuthEntry;
-        if (typeof fn === "function") return fn(preimage, opts);
-        return Promise.resolve({ signedAuthEntry: "" });
-      },
-      signBlob: (blob: string, opts?: any) => {
-        const fn = mod.signBlob || mod.default?.signBlob;
-        if (typeof fn === "function") return fn(blob, opts);
-        return Promise.resolve("");
-      },
-      getNetwork: () => {
-        const fn = mod.getNetwork || mod.default?.getNetwork;
-        if (typeof fn === "function") return fn();
-        return Promise.resolve("TESTNET");
-      },
-      listen: mod.listen || mod.default?.listen,
+      signTransaction: mod.signTransaction,
+      signAuthEntry: mod.signAuthEntry,
+      signBlob: typeof mod?.signBlob === "function" ? mod.signBlob : undefined,
+      getNetwork: typeof mod?.getNetwork === "function" ? mod.getNetwork : undefined,
+      listen: typeof mod?.listen === "function" ? mod.listen : undefined,
     };
   } catch {
+
     // Package not installed – graceful fallback stubs
-    return {
+    _freighter = {
       isConnected: async () => false,
       getAddress: async () => "",
       signTransaction: async () => "",
@@ -141,6 +113,7 @@ const loadFreighter = async (): Promise<FreighterShim> => {
       signBlob: async () => "",
     };
   }
+  return _freighter;
 };
 
 const loadStellarSdk = async (): Promise<any> => {
@@ -183,6 +156,11 @@ export interface StellarDocumentData {
   requiredAccess: number;
 }
 
+export interface StellarKeeperAuthorizationData {
+  keeper: string;
+  expiresAt: number;
+}
+
 export interface StellarPendingApprovalData {
   requestId: number;
   documentId: number;
@@ -203,9 +181,7 @@ export const getRpcUrl = (): string => {
 };
 
 export const getContractId = (): string => {
-  const cid = import.meta.env.VITE_STELLAR_CONTRACT_ADDRESS as
-    | string
-    | undefined;
+  const cid = import.meta.env.VITE_STELLAR_CONTRACT_ADDRESS as string | undefined;
   return cid || contractId || "";
 };
 
@@ -346,15 +322,11 @@ const isConfigured = (): boolean => {
   return !!getContractId();
 };
 
-const initialize = async (
-  customContractId?: string
-): Promise<string | null> => {
+const initialize = async (customContractId?: string): Promise<string | null> => {
   if (customContractId) {
     contractId = customContractId;
   } else {
-    contractId =
-      (import.meta.env.VITE_STELLAR_CONTRACT_ADDRESS as string | undefined) ||
-      "";
+    contractId = (import.meta.env.VITE_STELLAR_CONTRACT_ADDRESS as string | undefined) || "";
   }
 
   try {
@@ -436,9 +408,7 @@ const getNetwork = async (): Promise<string> => {
   return network || activeNetwork;
 };
 
-const getInjectedListen = ():
-  | ((callback: (event: StellarWalletChangeEvent) => void) => unknown)
-  | null => {
+const getInjectedListen = (): ((callback: (event: StellarWalletChangeEvent) => void) => unknown) | null => {
   if (typeof window === "undefined") return null;
   const injected = window.freighterApi || window.freighter;
   if (injected && typeof injected.listen === "function") {
@@ -447,9 +417,7 @@ const getInjectedListen = ():
   return null;
 };
 
-const loadListen = async (): Promise<
-  ((callback: (event: StellarWalletChangeEvent) => void) => unknown) | null
-> => {
+const loadListen = async (): Promise<((callback: (event: StellarWalletChangeEvent) => void) => unknown) | null> => {
   const freighter = await loadFreighter();
   if (typeof freighter.listen === "function") {
     return freighter.listen;
@@ -457,13 +425,8 @@ const loadListen = async (): Promise<
   return getInjectedListen();
 };
 
-const startPollingWatcher = (
-  listener: StellarWalletChangeListener
-): (() => void) => {
-  if (
-    typeof window === "undefined" ||
-    typeof window.setInterval !== "function"
-  ) {
+const startPollingWatcher = (listener: StellarWalletChangeListener): (() => void) => {
+  if (typeof window === "undefined" || typeof window.setInterval !== "function") {
     return () => {};
   }
 
@@ -555,7 +518,7 @@ export const subscribeToWalletChanges = (
   };
 };
 
-const getMockStorage = <T>(key: string, defaults: T): T => {
+const getMockStorage = <T,>(key: string, defaults: T): T => {
   try {
     if (typeof localStorage !== "undefined" && localStorage !== null) {
       const raw = localStorage.getItem(`spoovault-stellar-mock-${key}`);
@@ -568,7 +531,7 @@ const getMockStorage = <T>(key: string, defaults: T): T => {
   return raw ? (JSON.parse(raw) as T) : defaults;
 };
 
-const saveMockStorage = <T>(key: string, data: T) => {
+const saveMockStorage = <T,>(key: string, data: T) => {
   const jsonStr = JSON.stringify(data);
   try {
     if (typeof localStorage !== "undefined" && localStorage !== null) {
@@ -623,14 +586,6 @@ interface MockInvite {
   expiresAt: number;
 }
 
-export const isSigningRejection = (err: any): boolean => {
-  const msg = err?.message || String(err);
-  return (
-    /reject|decline|cancel|denied/i.test(msg) ||
-    msg.includes("Transaction was rejected")
-  );
-};
-
 const executeSorobanQuery = async (
   functionName: string,
   args: any[],
@@ -639,23 +594,23 @@ const executeSorobanQuery = async (
   const sdk = await loadStellarSdk();
   const server = new sdk.rpc.Server(sorobanRpcUrl);
   const contractAddress = contractAddressOverride || getContractId();
-  const sourceAddress =
-    activeAccount || "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  
+  const sourceAddress = activeAccount || "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
   const sourceAccount = new sdk.Account(sourceAddress, "0");
-
-  const scArgs = args.map((arg) => {
+  
+  const scArgs = args.map(arg => {
     if (typeof arg === "string" && arg.startsWith("G") && arg.length === 56) {
       return sdk.nativeToScVal(new sdk.Address(arg));
     }
     return sdk.nativeToScVal(arg);
   });
-
+  
   const op = sdk.Operation.invokeContractFunction({
     contract: new sdk.Address(contractAddress),
     function: functionName,
     args: scArgs,
   });
-
+  
   const tx = new sdk.TransactionBuilder(sourceAccount, {
     fee: "100",
     networkPassphrase: sdk.Networks.TESTNET,
@@ -663,15 +618,12 @@ const executeSorobanQuery = async (
     .addOperation(op)
     .setTimeout(30)
     .build();
-
+    
   const simulation = await server.simulateTransaction(tx);
   if (sdk.rpc.Api.isSimulationError(simulation)) {
     throw new Error(`Simulation failed: ${simulation.error}`);
   }
-
-  if (simulation.result?.retval) {
-    return sdk.scValToNative(simulation.result.retval);
-  }
+  
   if (simulation.results && simulation.results.length > 0) {
     const result = simulation.results[0];
     if (result.retval) {
@@ -681,59 +633,43 @@ const executeSorobanQuery = async (
   return null;
 };
 
-export const executeSorobanCall = async (
+const executeSorobanCall = async (
   functionName: string,
   args: any[],
   contractAddressOverride?: string
 ): Promise<any> => {
-  const freighter = await loadFreighter();
-  const connected = await freighter.isConnected();
-  if (!connected) {
-    throw new Error("Freighter not connected");
-  }
-  if (!activeAccount) {
-    const addr = await freighter.getAddress();
-    if (addr) {
-      activeAccount = addr;
-    } else {
-      throw new Error("Wallet not connected");
-    }
-  }
-
+  if (!activeAccount) throw new Error("Wallet not connected");
+  
   const sdk = await loadStellarSdk();
   const server = new sdk.rpc.Server(sorobanRpcUrl);
   const contractAddress = contractAddressOverride || getContractId();
+  
+  // 1. Fetch source account
   const sourceAccount = await server.getAccount(activeAccount);
-
+  
   // 2. Convert arguments
-  const scArgs = args.map((arg) => {
+  const scArgs = args.map(arg => {
     if (typeof arg === "string" && arg.startsWith("G") && arg.length === 56) {
       return sdk.nativeToScVal(new sdk.Address(arg));
     }
     if (Array.isArray(arg)) {
-      return sdk.nativeToScVal(
-        arg.map((item) => {
-          if (
-            typeof item === "string" &&
-            item.startsWith("G") &&
-            item.length === 56
-          ) {
-            return new sdk.Address(item);
-          }
-          return item;
-        })
-      );
+      return sdk.nativeToScVal(arg.map(item => {
+        if (typeof item === "string" && item.startsWith("G") && item.length === 56) {
+          return new sdk.Address(item);
+        }
+        return item;
+      }));
     }
     return sdk.nativeToScVal(arg);
   });
-
+  
   // 3. Build Operation & Base transaction
   const op = sdk.Operation.invokeContractFunction({
     contract: new sdk.Address(contractAddress),
     function: functionName,
     args: scArgs,
   });
-
+  
   const tx = new sdk.TransactionBuilder(sourceAccount, {
     fee: "100",
     networkPassphrase: sdk.Networks.TESTNET,
@@ -741,13 +677,13 @@ export const executeSorobanCall = async (
     .addOperation(op)
     .setTimeout(60)
     .build();
-
+    
   // 4. Simulate transaction
   const simulation = await server.simulateTransaction(tx);
   if (sdk.rpc.Api.isSimulationError(simulation)) {
     throw new Error(`Simulation failed: ${simulation.error}`);
   }
-
+  
   // 5. Sign auth entries (simulation entries) before Freighter submission
   if (simulation.results && simulation.results.length > 0) {
     const result = simulation.results[0];
@@ -762,97 +698,110 @@ export const executeSorobanCall = async (
 
         const signResponse = await freighter.signAuthEntry(preimageXdr);
         if (signResponse.error) {
-          throw new Error(
-            `Freighter auth entry signing failed: ${signResponse.error}`
-          );
+          throw new Error(`Freighter auth entry signing failed: ${signResponse.error}`);
         }
-
+        
         if (signResponse.signedAuthEntry) {
           const signedEntryXdr = signResponse.signedAuthEntry;
-          const parsedEntry = sdk.xdr.SorobanAuthorizationEntry.fromXDR(
-            signedEntryXdr,
-            "base64"
-          );
+          const parsedEntry = sdk.xdr.SorobanAuthorizationEntry.fromXDR(signedEntryXdr, "base64");
           result.auth[i] = parsedEntry;
         }
       }
     }
   }
-
+  
   // 6. Assemble the transaction with simulated data
   const preparedTx = sdk.rpc.assembleTransaction(tx, simulation).build();
-
+  
   // 7. Request Freighter user signature for transaction envelope
+  const freighter = await loadFreighter();
   if (typeof freighter.signTransaction !== "function") {
     throw new Error("Freighter wallet does not support signTransaction");
   }
-  let signedXdr: string | undefined;
-  try {
-    signedXdr = await freighter.signTransaction(preparedTx.toXDR(), {
-      network: "TESTNET",
-    });
-  } catch (err: any) {
-    if (isSigningRejection(err)) {
-      throw new Error("Transaction was rejected by user.");
-    }
-    throw err;
-  }
+  const signedXdr = await freighter.signTransaction(preparedTx.toXDR(), {
+    network: "TESTNET"
+  });
 
+  
   if (!signedXdr) {
-    throw new Error("Transaction was rejected by user.");
+    throw new Error("Transaction signing rejected or failed");
   }
-
+  
   // 8. Submit the transaction
-  const signedTx = sdk.TransactionBuilder.fromXDR(
-    signedXdr,
-    sdk.Networks.TESTNET
-  );
+  const signedTx = sdk.TransactionBuilder.fromXDR(signedXdr, sdk.Networks.TESTNET);
   const response = await server.sendTransaction(signedTx);
   if (response.status === "ERROR") {
-    throw new Error(
-      `Transaction submission failed: ${JSON.stringify(response.errorResult)}`
-    );
+    throw new Error(`Transaction submission failed: ${JSON.stringify(response.errorResult)}`);
   }
-
+  
   // 9. Poll for status
   let pollAttempts = 0;
   while (pollAttempts < 30) {
     const txStatus = await server.getTransaction(response.hash);
     if (txStatus.status === "SUCCESS") {
-      if (txStatus.returnValue) {
-        return sdk.scValToNative(txStatus.returnValue);
-      }
-      if (
-        simulation.results &&
-        simulation.results.length > 0 &&
-        simulation.results[0].retval
-      ) {
+      if (simulation.results && simulation.results.length > 0 && simulation.results[0].retval) {
         return sdk.scValToNative(simulation.results[0].retval);
-      }
-      if (simulation.result?.retval) {
-        return sdk.scValToNative(simulation.result.retval);
       }
       return null;
     } else if (txStatus.status === "FAILED") {
-      throw new Error(
-        `Transaction execution failed: ${JSON.stringify(txStatus.resultXdr)}`
-      );
+      throw new Error(`Transaction execution failed: ${JSON.stringify(txStatus.resultXdr)}`);
     }
-    const delayMs =
-      typeof process !== "undefined" && process.env.NODE_ENV === "test"
-        ? 1
-        : 1000;
+    const delayMs = typeof process !== "undefined" && process.env.NODE_ENV === "test" ? 1 : 1000;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     pollAttempts++;
   }
-
+  
   throw new Error("Transaction polling timed out");
 };
 
-const ensureConfigured = () => {
-  if (!isConfigured()) {
-    throw new Error("Stellar contract is not configured");
+const syncProofOfLife = async (
+  vaultId: number,
+  evmVaultId: number,
+  gidHash: string,
+  evmOwner: string,
+  timestamp: number,
+  signature: string,
+  recoveryId: number,
+  relayer?: string
+): Promise<void> => {
+  if (!activeAccount) throw new Error("Wallet not connected");
+  if (relayer && relayer !== activeAccount) {
+    throw new Error("Configured relayer does not match the connected Stellar account");
   }
+  if (!isConfigured()) {
+    throw new Error("Stellar contract is not configured for heartbeat relay");
+  }
+
+  await executeSorobanCall("sync_proof_of_life", [
+    activeAccount,
+    vaultId,
+    evmVaultId,
+    hexToBytes(gidHash),
+    hexToBytes(evmOwner),
+    timestamp,
+    hexToBytes(signature),
+    recoveryId,
+  ]);
+};
+
+const bindCrossChainHeartbeat = async (
+  vaultId: number,
+  gidHash: string,
+  evmOwner: string,
+  relayer: string
+): Promise<void> => {
+  if (!activeAccount) throw new Error("Wallet not connected");
+  if (!isConfigured()) {
+    throw new Error("Stellar contract is not configured for heartbeat binding");
+  }
+
+  await executeSorobanCall("bind_cross_chain_heartbeat", [
+    activeAccount,
+    vaultId,
+    hexToBytes(gidHash),
+    hexToBytes(evmOwner),
+    relayer,
+  ]);
 };
 
 const createVault = async (
@@ -862,15 +811,55 @@ const createVault = async (
   approvalThreshold: number
 ): Promise<number> => {
   if (!activeAccount) throw new Error("Wallet not connected");
-  ensureConfigured();
-  const vaultId = await executeSorobanCall("create_vault", [
-    activeAccount,
+
+  // If contract is set up, perform genuine Soroban call
+  if (isConfigured()) {
+    try {
+      const vaultId = await executeSorobanCall("create_vault", [
+        activeAccount,
+        name,
+        description,
+        guardians,
+        approvalThreshold,
+      ]);
+      return Number(vaultId);
+    } catch (err) {
+      console.error("Soroban create_vault failed:", err);
+      throw err;
+    }
+  }
+
+  // Fallback to Mock Database for instantaneous UI execution and debugging
+  const vaults = getMockStorage<MockVault[]>("vaults", []);
+  const nextId = vaults.length + 1;
+  const newVault: MockVault = {
+    id: nextId,
+    creator: activeAccount,
     name,
     description,
-    guardians,
+    guardians: [activeAccount],
     approvalThreshold,
-  ]);
-  return Number(vaultId);
+    isActive: true,
+    createdAt: Math.floor(Date.now() / 1000),
+  };
+
+  vaults.push(newVault);
+  saveMockStorage("vaults", vaults);
+
+  // Add invites
+  const invites = getMockStorage<MockInvite[]>("invites", []);
+  for (const guardian of guardians) {
+    if (guardian.toLowerCase() === activeAccount.toLowerCase()) continue;
+    invites.push({
+      guardian: guardian.trim(),
+      vaultId: nextId,
+      accepted: false,
+      expiresAt: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+    });
+  }
+  saveMockStorage("invites", invites);
+
+  return nextId;
 };
 
 const getVault = async (vaultId: number): Promise<StellarVaultData | null> => {
@@ -879,12 +868,10 @@ const getVault = async (vaultId: number): Promise<StellarVaultData | null> => {
   return vault || null;
 };
 
-const fetchVaultsForAccount = async (
-  account: string
-): Promise<StellarVaultData[]> => {
+const fetchVaultsForAccount = async (account: string): Promise<StellarVaultData[]> => {
   const vaults = getMockStorage<MockVault[]>("vaults", []);
   const target = account.toLowerCase();
-
+  
   // Return vaults where user is a creator or active guardian
   return vaults
     .filter(
@@ -905,23 +892,52 @@ const addDocument = async (
   shares: string[] = []
 ): Promise<number> => {
   if (!activeAccount) throw new Error("Wallet not connected");
-  ensureConfigured();
-  const docId = await executeSorobanCall("add_document", [
-    activeAccount,
+
+  if (isConfigured()) {
+    try {
+      const docId = await executeSorobanCall("add_document", [
+        activeAccount,
+        vaultId,
+        encryptedMetadata,
+        ipfsHash,
+        requiredAccess,
+        releaseCondition,
+        guardiansList,
+        shares
+      ]);
+      return Number(docId);
+    } catch (err) {
+      console.error("Soroban add_document failed:", err);
+      throw err;
+    }
+  }
+
+  const docs = getMockStorage<MockDocument[]>("documents", []);
+  const nextId = docs.length + 1;
+
+  const sharesMap: Record<string, string> = {};
+  guardiansList.forEach((guardian, idx) => {
+    sharesMap[guardian] = shares[idx];
+  });
+
+  const newDoc: MockDocument = {
+    id: nextId,
     vaultId,
     encryptedMetadata,
     ipfsHash,
+    uploadedBy: activeAccount,
+    uploadedAt: Math.floor(Date.now() / 1000),
     requiredAccess,
     releaseCondition,
-    guardiansList,
-    shares,
-  ]);
-  return Number(docId);
+    shares: sharesMap,
+  };
+
+  docs.push(newDoc);
+  saveMockStorage("documents", docs);
+  return nextId;
 };
 
-const fetchDocumentsForVaults = async (
-  vaultIds: number[]
-): Promise<StellarDocumentData[]> => {
+const fetchDocumentsForVaults = async (vaultIds: number[]): Promise<StellarDocumentData[]> => {
   const docs = getMockStorage<MockDocument[]>("documents", []);
   const set = new Set(vaultIds);
   return docs.filter((d) => set.has(d.vaultId));
@@ -929,25 +945,83 @@ const fetchDocumentsForVaults = async (
 
 const requestAccess = async (documentId: number): Promise<number> => {
   if (!activeAccount) throw new Error("Wallet not connected");
-  ensureConfigured();
-  const requestId = await executeSorobanCall("request_access", [
-    activeAccount,
+
+  if (isConfigured()) {
+    try {
+      const requestId = await executeSorobanCall("request_access", [
+        activeAccount,
+        documentId
+      ]);
+      return Number(requestId);
+    } catch (err) {
+      console.error("Soroban request_access failed:", err);
+      throw err;
+    }
+  }
+
+  const requests = getMockStorage<MockRequest[]>("requests", []);
+  const nextId = requests.length + 1;
+
+  const newReq: MockRequest = {
+    requestId: nextId,
     documentId,
-  ]);
-  return Number(requestId);
+    requester: activeAccount,
+    approvedBy: [],
+    status: 0, // Pending
+    expiresAt: Math.floor(Date.now() / 1000) + 3 * 24 * 60 * 60,
+    createdAt: Math.floor(Date.now() / 1000),
+    beneficiaryShares: {},
+  };
+
+  requests.push(newReq);
+  saveMockStorage("requests", requests);
+  return nextId;
 };
 
-const approveAccess = async (
-  requestId: number,
-  encryptedShareForBeneficiary?: string
-): Promise<void> => {
+const approveAccess = async (requestId: number, encryptedShareForBeneficiary?: string): Promise<void> => {
   if (!activeAccount) throw new Error("Wallet not connected");
-  ensureConfigured();
-  await executeSorobanCall("approve_access", [
-    activeAccount,
-    requestId,
-    encryptedShareForBeneficiary || null,
-  ]);
+
+  if (isConfigured()) {
+    try {
+      await executeSorobanCall("approve_access", [
+        activeAccount,
+        requestId,
+        encryptedShareForBeneficiary || null
+      ]);
+      return;
+    } catch (err) {
+      console.error("Soroban approve_access failed:", err);
+      throw err;
+    }
+  }
+
+  const requests = getMockStorage<MockRequest[]>("requests", []);
+  const reqIdx = requests.findIndex((r) => r.requestId === requestId);
+  if (reqIdx === -1) throw new Error("Request not found");
+
+  const req = requests[reqIdx];
+  if (req.approvedBy.includes(activeAccount)) {
+    throw new Error("Already approved");
+  }
+
+  req.approvedBy.push(activeAccount);
+  if (encryptedShareForBeneficiary) {
+    req.beneficiaryShares[activeAccount] = encryptedShareForBeneficiary;
+  }
+
+  // Fetch vault approval threshold
+  const docs = getMockStorage<MockDocument[]>("documents", []);
+  const doc = docs.find((d) => d.id === req.documentId);
+  if (doc) {
+    const vaults = getMockStorage<MockVault[]>("vaults", []);
+    const vault = vaults.find((v) => v.id === doc.vaultId);
+    if (vault && req.approvedBy.length >= vault.approvalThreshold) {
+      req.status = 1; // Approved
+    }
+  }
+
+  requests[reqIdx] = req;
+  saveMockStorage("requests", requests);
 };
 
 const fetchPendingApprovalsForGuardian = async (
@@ -988,19 +1062,13 @@ const fetchPendingApprovalsForGuardian = async (
   return pending;
 };
 
-const getEncryptedGuardianShare = async (
-  documentId: number,
-  guardian: string
-): Promise<string> => {
+const getEncryptedGuardianShare = async (documentId: number, guardian: string): Promise<string> => {
   const docs = getMockStorage<MockDocument[]>("documents", []);
   const doc = docs.find((d) => d.id === documentId);
   return doc?.shares?.[guardian] || "";
 };
 
-const getBeneficiaryKeyShare = async (
-  requestId: number,
-  guardian: string
-): Promise<string> => {
+const getBeneficiaryKeyShare = async (requestId: number, guardian: string): Promise<string> => {
   const requests = getMockStorage<MockRequest[]>("requests", []);
   const req = requests.find((r) => r.requestId === requestId);
   return req?.beneficiaryShares?.[guardian] || "";
@@ -1009,33 +1077,72 @@ const getBeneficiaryKeyShare = async (
 const getPendingInvites = async (account: string): Promise<MockInvite[]> => {
   const invites = getMockStorage<MockInvite[]>("invites", []);
   const target = account.toLowerCase();
-  return invites.filter(
-    (inv) => inv.guardian.toLowerCase() === target && !inv.accepted
-  );
+  return invites.filter((inv) => inv.guardian.toLowerCase() === target && !inv.accepted);
 };
 
 const acceptGuardianInvite = async (vaultId: number): Promise<void> => {
   if (!activeAccount) throw new Error("Wallet not connected");
-  ensureConfigured();
-  await executeSorobanCall("accept_guardian_invite", [
-    activeAccount,
-    vaultId,
-  ]);
+
+  if (isConfigured()) {
+    try {
+      await executeSorobanCall("accept_guardian_invite", [
+        activeAccount,
+        vaultId
+      ]);
+      return;
+    } catch (err) {
+      console.error("Soroban accept_guardian_invite failed:", err);
+      throw err;
+    }
+  }
+
+  const invites = getMockStorage<MockInvite[]>("invites", []);
+  const invIdx = invites.findIndex(
+    (inv) => inv.vaultId === vaultId && inv.guardian.toLowerCase() === activeAccount!.toLowerCase()
+  );
+
+  if (invIdx !== -1) {
+    invites[invIdx].accepted = true;
+    saveMockStorage("invites", invites);
+  }
+
+  const vaults = getMockStorage<MockVault[]>("vaults", []);
+  const vaultIdx = vaults.findIndex((v) => v.id === vaultId);
+  if (vaultIdx !== -1) {
+    if (!vaults[vaultIdx].guardians.includes(activeAccount)) {
+      vaults[vaultIdx].guardians.push(activeAccount);
+      saveMockStorage("vaults", vaults);
+    }
+  }
 };
 
 const registerPublicKey = async (publicKey: string): Promise<void> => {
   if (!activeAccount) throw new Error("Wallet not connected");
-  ensureConfigured();
-  await executeSorobanCall("register_public_key", [
-    activeAccount,
-    publicKey,
-  ]);
+
+  if (isConfigured()) {
+    try {
+      await executeSorobanCall("register_public_key", [
+        activeAccount,
+        publicKey
+      ]);
+      return;
+    } catch (err) {
+      console.error("Soroban register_public_key failed:", err);
+      throw err;
+    }
+  }
+
+  const pubKeys = getMockStorage<Record<string, string>>("public_keys", {});
+  pubKeys[activeAccount] = publicKey;
+  saveMockStorage("public_keys", pubKeys);
 };
 
 const getUserPublicKey = async (user: string): Promise<string> => {
   if (isConfigured()) {
     try {
-      const pubKey = await executeSorobanQuery("get_public_key", [user]);
+      const pubKey = await executeSorobanQuery("get_public_key", [
+        user
+      ]);
       return pubKey || "";
     } catch (err) {
       console.error("Soroban get_public_key failed:", err);
@@ -1054,9 +1161,7 @@ interface MockToken {
   mintedAt: number;
 }
 
-const fetchUserTokens = async (
-  account: string
-): Promise<StellarTokenData[]> => {
+const fetchUserTokens = async (account: string): Promise<StellarTokenData[]> => {
   if (!account) return [];
   const tokens = getMockStorage<MockToken[]>("tokens", []);
   const target = account.toLowerCase();
@@ -1071,10 +1176,7 @@ const fetchUserTokens = async (
     }));
 };
 
-const hasVaultToken = async (
-  account: string,
-  vaultId: number
-): Promise<boolean> => {
+const hasVaultToken = async (account: string, vaultId: number): Promise<boolean> => {
   if (!account || !vaultId || vaultId <= 0) return false;
   try {
     const tokens = getMockStorage<MockToken[]>("tokens", []);
@@ -1087,7 +1189,7 @@ const hasVaultToken = async (
     if (isConfigured()) {
       const hasToken = await executeSorobanQuery("has_vault_token", [
         account,
-        vaultId,
+        vaultId
       ]);
       return !!hasToken;
     }
@@ -1108,7 +1210,7 @@ const mintAccessToken = async (
       const tokenId = await executeSorobanCall("mint_access_token", [
         vaultId,
         to,
-        tokenURI,
+        tokenURI
       ]);
       return Number(tokenId);
     } catch (err) {
@@ -1131,6 +1233,108 @@ const mintAccessToken = async (
   return nextId;
 };
 
+interface MockKeeperAuthorization {
+  keeper: string;
+  expiresAt: number;
+}
+
+/**
+ * Authorize a Web3 Keeper (Chainlink Automation / Gelato) to relay proof-of-life
+ * heartbeats for `vaultId` until `expiresAt`. Soroban's native `require_auth`
+ * already separates who authorizes an action from who submits/pays for the
+ * transaction, so — unlike the EVM side — this needs no off-chain signature
+ * scheme of its own: it's a normal owner-signed contract call.
+ */
+const authorizeKeeper = async (
+  vaultId: number,
+  keeper: string,
+  expiresAt: number
+): Promise<void> => {
+  if (!activeAccount) throw new Error("Wallet not connected");
+
+  if (isConfigured()) {
+    try {
+      await executeSorobanCall("authorize_keeper", [activeAccount, vaultId, keeper, expiresAt]);
+      return;
+    } catch (err) {
+      console.error("Soroban authorize_keeper failed:", err);
+      throw err;
+    }
+  }
+
+  const authorizations = getMockStorage<Record<number, MockKeeperAuthorization>>(
+    "keeper_authorizations",
+    {}
+  );
+  authorizations[vaultId] = { keeper, expiresAt };
+  saveMockStorage("keeper_authorizations", authorizations);
+};
+
+const revokeKeeperAuthorization = async (vaultId: number): Promise<void> => {
+  if (!activeAccount) throw new Error("Wallet not connected");
+
+  if (isConfigured()) {
+    try {
+      await executeSorobanCall("revoke_keeper", [activeAccount, vaultId]);
+      return;
+    } catch (err) {
+      console.error("Soroban revoke_keeper failed:", err);
+      throw err;
+    }
+  }
+
+  const authorizations = getMockStorage<Record<number, MockKeeperAuthorization>>(
+    "keeper_authorizations",
+    {}
+  );
+  delete authorizations[vaultId];
+  saveMockStorage("keeper_authorizations", authorizations);
+};
+
+const getKeeperAuthorization = async (
+  vaultId: number
+): Promise<StellarKeeperAuthorizationData | null> => {
+  if (isConfigured()) {
+    try {
+      const result = await executeSorobanQuery("get_keeper_authorization", [vaultId]);
+      if (!result) return null;
+      return {
+        keeper: String(result.keeper ?? result[0]),
+        expiresAt: Number(result.expires_at ?? result[1]),
+      };
+    } catch (err) {
+      console.error("Soroban get_keeper_authorization failed:", err);
+      return null;
+    }
+  }
+
+  const authorizations = getMockStorage<Record<number, MockKeeperAuthorization>>(
+    "keeper_authorizations",
+    {}
+  );
+  return authorizations[vaultId] || null;
+};
+
+/**
+ * Web3 Keeper relay of a proof-of-life heartbeat, submitted using the keeper's
+ * own connected account as both the transaction source and the `require_auth`
+ * signer — gated by a prior {authorizeKeeper} grant on-chain.
+ */
+const relayProofOfLifeAsKeeper = async (vaultId: number): Promise<void> => {
+  if (!activeAccount) throw new Error("Wallet not connected");
+
+  if (!isConfigured()) {
+    throw new Error("Proof-of-life relay requires a configured Soroban contract.");
+  }
+
+  try {
+    await executeSorobanCall("prove_life_by_keeper", [activeAccount, vaultId]);
+  } catch (err) {
+    console.error("Soroban prove_life_by_keeper failed:", err);
+    throw err;
+  }
+};
+
 const saveCrossChainBindingMock = (
   evmAddress: string,
   stellarAddress: string,
@@ -1139,18 +1343,9 @@ const saveCrossChainBindingMock = (
   const normEvm = evmAddress.toLowerCase().trim();
   const normStellar = stellarAddress.trim();
 
-  const evmToStellar = getMockStorage<Record<string, string>>(
-    "cross_evm_to_stellar",
-    {}
-  );
-  const stellarToEvm = getMockStorage<Record<string, string>>(
-    "cross_stellar_to_evm",
-    {}
-  );
-  const evmToPubkey = getMockStorage<Record<string, string>>(
-    "cross_evm_to_pubkey",
-    {}
-  );
+  const evmToStellar = getMockStorage<Record<string, string>>("cross_evm_to_stellar", {});
+  const stellarToEvm = getMockStorage<Record<string, string>>("cross_stellar_to_evm", {});
+  const evmToPubkey = getMockStorage<Record<string, string>>("cross_evm_to_pubkey", {});
 
   evmToStellar[normEvm] = normStellar;
   stellarToEvm[normStellar] = normEvm;
@@ -1200,9 +1395,7 @@ const resolveEvmToStellar = async (evmAddress: string): Promise<string | null> =
   return evmToStellar[normEvm] || null;
 };
 
-const resolveStellarToEvm = async (
-  stellarAddress: string
-): Promise<string | null> => {
+const resolveStellarToEvm = async (stellarAddress: string): Promise<string | null> => {
   const normStellar = stellarAddress.trim();
 
   if (isIdentityRegistryConfigured()) {
@@ -1363,10 +1556,7 @@ const signIdentityBindingWithFreighter = async (messageHash: string): Promise<st
 
 const resolveEvmToPublicKey = async (evmAddress: string): Promise<string | null> => {
   const normEvm = evmAddress.toLowerCase().trim();
-  const evmToPubkey = getMockStorage<Record<string, string>>(
-    "cross_evm_to_pubkey",
-    {}
-  );
+  const evmToPubkey = getMockStorage<Record<string, string>>("cross_evm_to_pubkey", {});
   if (evmToPubkey[normEvm]) {
     return evmToPubkey[normEvm];
   }
@@ -1379,17 +1569,6 @@ const resolveEvmToPublicKey = async (evmAddress: string): Promise<string | null>
   }
 
   return null;
-};
-
-export const invokeSorobanContract = async (
-  functionName: string,
-  args: any[],
-  options?: { readonly?: boolean; contractAddress?: string }
-): Promise<any> => {
-  if (options?.readonly) {
-    return executeSorobanQuery(functionName, args, options.contractAddress);
-  }
-  return executeSorobanCall(functionName, args, options?.contractAddress);
 };
 
 export const stellarService = {
@@ -1423,30 +1602,30 @@ export const stellarService = {
   resolveEvmToStellar,
   resolveStellarToEvm,
   resolveEvmToPublicKey,
+  authorizeKeeper,
+  revokeKeeperAuthorization,
+  getKeeperAuthorization,
+  relayProofOfLifeAsKeeper,
   buildIdentityBindingMessageHash,
   signIdentityBindingWithMetaMask,
   signIdentityBindingWithFreighter,
   bindIdentity,
+  syncProofOfLife,
+  bindCrossChainHeartbeat,
   getIdentityRegistryContractId,
   isConfigured,
   setMockStellarSdk,
   setMockFreighter,
-  invokeSorobanContract,
+  invokeSorobanContract: executeSorobanCall,
 };
 
 declare global {
   interface Window {
     freighterApi?: {
-      listen?: (
-        callback: (event: StellarWalletChangeEvent) => void,
-        opts?: { network?: string }
-      ) => unknown;
+      listen?: (callback: (event: StellarWalletChangeEvent) => void, opts?: { network?: string }) => unknown;
     };
     freighter?: {
-      listen?: (
-        callback: (event: StellarWalletChangeEvent) => void,
-        opts?: { network?: string }
-      ) => unknown;
+      listen?: (callback: (event: StellarWalletChangeEvent) => void, opts?: { network?: string }) => unknown;
     };
   }
 }

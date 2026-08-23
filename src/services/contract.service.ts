@@ -2,6 +2,20 @@ import { ethers } from "ethers";
 import { stellarService } from "./stellar.service";
 import { identityService } from "./identity.service";
 import { TtlCache } from "../utils/ttlCache";
+import {
+  OfflineQueuedError,
+  isNetworkFailure,
+  withOfflineFallback,
+  readDocumentsCache,
+  readInvitesCache,
+  readPublicKeyCache,
+  readVaultsCache,
+  writeDocumentsCache,
+  writeInvitesCache,
+  writePublicKeyCache,
+  writeVaultsCache,
+} from "./offline/offlineCache.service";
+import { enqueueAction } from "./offline/offlineQueue.service";
 
 export interface VaultData {
   id: number;
@@ -75,6 +89,11 @@ export interface VaultReleaseState {
   postDeathUnlocked: boolean;
 }
 
+export interface KeeperAuthorizationData {
+  keeper: string;
+  expiresAt: number;
+}
+
 const CONTRACT_ABI = [
   "function createVault(string name, string description, address[] guardians, uint256 approvalThreshold) external returns (uint256)",
   "function addDocument(uint256 vaultId, string encryptedMetadata, string ipfsHash, uint8 requiredAccess) external returns (uint256)",
@@ -83,7 +102,15 @@ const CONTRACT_ABI = [
   "function addDocumentWithReleaseCondition(uint256 vaultId, string encryptedMetadata, string ipfsHash, uint8 requiredAccess, uint8 releaseCondition, address[] guardiansList, string[] shares) external returns (uint256)",
   "function configureVaultRelease(uint256 vaultId, uint256 inactivityPeriod) external",
   "function proveLife(uint256 vaultId) external",
+  "function authorizeKeeperBySig(uint256 vaultId, address keeper, uint256 expiresAt, bytes signature) external",
+  "function revokeKeeper(uint256 vaultId) external",
+  "function proveLifeByKeeper(uint256 vaultId) external",
+  "function keeperAuthorizations(uint256 vaultId) external view returns (address keeper, uint256 expiresAt)",
+  "function keeperAuthNonces(uint256 vaultId) external view returns (uint256)",
+  "function getVaultGID(uint256 vaultId) external view returns (string)",
   "function setEmergencyMode(uint256 vaultId, bool enabled) external",
+  "function setBeneficiary(uint256 vaultId, address beneficiary) external",
+  "function getBeneficiary(uint256 vaultId) external view returns (address)",
   "function getVaultReleaseState(uint256 vaultId) external view returns (bool emergencyMode, uint256 inactivityPeriod, uint256 lastProofOfLife, bool postDeathUnlocked)",
   "function documentReleaseCondition(uint256 documentId) external view returns (uint8)",
   "function requestAccess(uint256 documentId) external returns (uint256)",
@@ -121,7 +148,20 @@ const CONTRACT_ABI = [
   "event PublicKeyRegistered(address indexed user, string publicKey)",
   "event GuardianSharesSaved(uint256 indexed documentId)",
   "event ShareSubmittedForBeneficiary(uint256 indexed requestId, address indexed guardian, string encryptedShare)",
+  "event BeneficiarySet(uint256 indexed vaultId, address indexed beneficiary)",
+  "event KeeperAuthorized(uint256 indexed vaultId, address indexed owner, address indexed keeper, uint256 expiresAt)",
+  "event KeeperRevoked(uint256 indexed vaultId, address indexed owner)",
+  "event ProofOfLifeRelayed(uint256 indexed vaultId, address indexed owner, address indexed keeper, uint256 timestamp)",
 ];
+
+const KEEPER_AUTHORIZATION_EIP712_TYPES = {
+  KeeperAuthorization: [
+    { name: "vaultId", type: "uint256" },
+    { name: "keeper", type: "address" },
+    { name: "expiresAt", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+  ],
+};
 
 let provider: ethers.Provider | null = null;
 let fallbackProviders: ethers.JsonRpcProvider[] = [];
@@ -160,9 +200,7 @@ const getContractAddress = (): string => {
 };
 
 const getRpcCandidates = (): string[] => {
-  const configured = (
-    import.meta.env.VITE_AVALANCHE_RPC as string | undefined
-  )?.trim();
+  const configured = (import.meta.env.VITE_AVALANCHE_RPC as string | undefined)?.trim();
   const chainId = Number(import.meta.env.VITE_CHAIN_ID);
   const defaults = chainId === 43114 ? MAINNET_RPC_URLS : FUJI_RPC_URLS;
   const all = configured ? [configured, ...defaults] : [...defaults];
@@ -220,11 +258,7 @@ const waitForReceipt = async (tx: any) => {
   if (tx?.hash && fallbackProviders.length > 0) {
     for (const activeProvider of fallbackProviders) {
       try {
-        const mined = await activeProvider.waitForTransaction(
-          tx.hash,
-          1,
-          timeoutMs
-        );
+        const mined = await activeProvider.waitForTransaction(tx.hash, 1, timeoutMs);
         if (mined) {
           return mined;
         }
@@ -282,10 +316,7 @@ const ensureWriteContract = (): ethers.Contract => {
   return writeContract;
 };
 
-const contractHasFunction = (
-  contract: ethers.Contract,
-  signature: string
-): boolean => {
+const contractHasFunction = (contract: ethers.Contract, signature: string): boolean => {
   try {
     contract.interface.getFunction(signature);
     return true;
@@ -304,7 +335,7 @@ const getLogChunkSize = (): number => {
   return 2000;
 };
 
-const chunkArray = <T>(items: T[], size: number): T[][] => {
+const chunkArray = <T,>(items: T[], size: number): T[][] => {
   if (size <= 0) return [items];
   const chunks: T[][] = [];
   for (let i = 0; i < items.length; i += size) {
@@ -500,9 +531,7 @@ const normalizeFilterValue = (
 
 const normalizeFilterValues = (
   filters: EventLogQueryOptions["filters"]
-):
-  | Array<string | bigint | null | Array<string | bigint | null>>
-  | undefined => {
+): Array<string | bigint | null | Array<string | bigint | null>> | undefined => {
   if (!filters) return undefined;
   return filters.map((filter) => {
     if (Array.isArray(filter)) {
@@ -542,9 +571,7 @@ const getEventLogs = async (
   const fromBlock = await getFromBlock();
   const cached = readEventLogCache(eventName, address, filterKey);
   const cachedLogs = cached
-    ? cached.logs
-        .map(fromCacheRecord)
-        .filter((log) => log.blockNumber >= fromBlock)
+    ? cached.logs.map(fromCacheRecord).filter((log) => log.blockNumber >= fromBlock)
     : [];
   let lastError: string | null = null;
 
@@ -563,11 +590,7 @@ const getEventLogs = async (
         ? Math.max(startBlock, cached!.lastSyncedBlock + 1)
         : startBlock;
 
-      for (
-        let current = incrementalStart;
-        current <= toBlock;
-        current += chunkSize
-      ) {
+      for (let current = incrementalStart; current <= toBlock; current += chunkSize) {
         const end = Math.min(current + chunkSize - 1, toBlock);
         const chunk = await activeProvider.getLogs({
           address,
@@ -599,17 +622,14 @@ const getEventLogs = async (
       logs = sortLogsAscending(cachedLogs);
       lastError = null;
     } else {
-      const hint =
-        "Log query failed. Set VITE_CONTRACT_DEPLOY_BLOCK to the contract deploy block.";
+      const hint = "Log query failed. Set VITE_CONTRACT_DEPLOY_BLOCK to the contract deploy block.";
       throw new Error(`[${eventName}] ${hint} ${lastError}`);
     }
   }
 
   const effectiveTail = options?.tail && options.tail > 0 ? options.tail : 0;
   const logsForParsing =
-    effectiveTail > 0 && logs.length > effectiveTail
-      ? logs.slice(-effectiveTail)
-      : logs;
+    effectiveTail > 0 && logs.length > effectiveTail ? logs.slice(-effectiveTail) : logs;
 
   const parsedLogs = logsForParsing
     .map((log) => {
@@ -617,10 +637,7 @@ const getEventLogs = async (
       if (!parsed) return null;
       return { log, parsed };
     })
-    .filter(
-      (entry): entry is { log: ethers.Log; parsed: ethers.LogDescription } =>
-        entry !== null
-    );
+    .filter((entry): entry is { log: ethers.Log; parsed: ethers.LogDescription } => entry !== null);
 
   return parsedLogs;
 };
@@ -733,8 +750,7 @@ const addDocument = async (
 ): Promise<number> => {
   const contract = ensureWriteContract();
   let tx: any;
-  const hasShares =
-    guardiansList && shares && guardiansList.length > 0 && shares.length > 0;
+  const hasShares = guardiansList && shares && guardiansList.length > 0 && shares.length > 0;
 
   if (
     releaseCondition !== 0 &&
@@ -763,13 +779,7 @@ const addDocument = async (
       );
     }
   } else if (releaseCondition === 0) {
-    if (
-      hasShares &&
-      contractHasFunction(
-        contract,
-        "addDocument(uint256,string,string,uint8,address[],string[])"
-      )
-    ) {
+    if (hasShares && contractHasFunction(contract, "addDocument(uint256,string,string,uint8,address[],string[])")) {
       tx = await contract.addDocument(
         vaultId,
         encryptedMetadata,
@@ -837,16 +847,10 @@ const requestAccess = async (documentId: number): Promise<number> => {
   return 0;
 };
 
-const approveAccess = async (
-  requestId: number,
-  encryptedShareForBeneficiary?: string
-): Promise<void> => {
+const approveAccess = async (requestId: number, encryptedShareForBeneficiary?: string): Promise<void> => {
   const contract = ensureWriteContract();
   let tx: any;
-  if (
-    encryptedShareForBeneficiary &&
-    contractHasFunction(contract, "approveAccess(uint256,string)")
-  ) {
+  if (encryptedShareForBeneficiary && contractHasFunction(contract, "approveAccess(uint256,string)")) {
     tx = await contract.approveAccess(requestId, encryptedShareForBeneficiary);
   } else {
     tx = await contract.approveAccess(requestId);
@@ -870,10 +874,7 @@ const getUserPublicKey = async (user: string): Promise<string> => {
   }
 };
 
-const getEncryptedGuardianShare = async (
-  documentId: number,
-  guardian: string
-): Promise<string> => {
+const getEncryptedGuardianShare = async (documentId: number, guardian: string): Promise<string> => {
   await ensureContractDeployed();
   const contract = ensureReadContract();
   try {
@@ -883,10 +884,7 @@ const getEncryptedGuardianShare = async (
   }
 };
 
-const getBeneficiaryKeyShare = async (
-  requestId: number,
-  guardian: string
-): Promise<string> => {
+const getBeneficiaryKeyShare = async (requestId: number, guardian: string): Promise<string> => {
   await ensureContractDeployed();
   const contract = ensureReadContract();
   try {
@@ -947,13 +945,8 @@ const burnAccessToken = async (tokenId: number): Promise<void> => {
   clearAccessCache();
 };
 
-const cachedGetVault = (
-  contract: ethers.Contract,
-  vaultId: number
-): Promise<any> =>
-  getVaultCache.getOrFetch(`getVault:${vaultId}`, () =>
-    contract.getVault(vaultId)
-  );
+const cachedGetVault = (contract: ethers.Contract, vaultId: number): Promise<any> =>
+  getVaultCache.getOrFetch(`getVault:${vaultId}`, () => contract.getVault(vaultId));
 
 const mapVaultData = (vault: any): VaultData => ({
   id: Number(vault[0]),
@@ -1007,9 +1000,7 @@ const fetchVaults = async (): Promise<VaultData[]> => {
     new Set(logs.map((entry) => Number(entry.parsed.args.vaultId)))
   );
 
-  const vaults = await Promise.all(
-    ids.map((id) => cachedGetVault(contract, id))
-  );
+  const vaults = await Promise.all(ids.map((id) => cachedGetVault(contract, id)));
   return vaults.map((vault) => mapVaultData(vault));
 };
 
@@ -1021,14 +1012,14 @@ const fetchDocuments = async (): Promise<DocumentData[]> => {
     new Set(logs.map((entry) => Number(entry.parsed.args.documentId)))
   );
 
-  const documents = await Promise.all(ids.map((id) => contract.documents(id)));
+  const documents = await Promise.all(
+    ids.map((id) => contract.documents(id))
+  );
 
   return documents.map((doc) => mapDocumentData(doc));
 };
 
-const fetchDocumentsForVaults = async (
-  vaultIds: number[]
-): Promise<DocumentData[]> => {
+const fetchDocumentsForVaults = async (vaultIds: number[]): Promise<DocumentData[]> => {
   await ensureContractDeployed();
   const contract = ensureReadContract();
   const uniqueVaultIds = Array.from(new Set(vaultIds)).filter((id) => id > 0);
@@ -1075,12 +1066,8 @@ const fetchVaultsForAccount = async (
   ]);
 
   const vaultIds = new Set<number>();
-  createdLogs.forEach((entry) =>
-    vaultIds.add(Number(entry.parsed.args.vaultId))
-  );
-  guardianLogs.forEach((entry) =>
-    vaultIds.add(Number(entry.parsed.args.vaultId))
-  );
+  createdLogs.forEach((entry) => vaultIds.add(Number(entry.parsed.args.vaultId)));
+  guardianLogs.forEach((entry) => vaultIds.add(Number(entry.parsed.args.vaultId)));
 
   if (options?.tokenVaultIds?.length) {
     options.tokenVaultIds
@@ -1090,9 +1077,7 @@ const fetchVaultsForAccount = async (
     const mintedLogs = await getEventLogs("NFTMinted", {
       filters: [null, accountLower, null],
     });
-    mintedLogs.forEach((entry) =>
-      vaultIds.add(Number(entry.parsed.args.vaultId))
-    );
+    mintedLogs.forEach((entry) => vaultIds.add(Number(entry.parsed.args.vaultId)));
   }
 
   const candidateVaults = await fetchVaultsByIds(Array.from(vaultIds));
@@ -1219,9 +1204,7 @@ const getLatestRequestsForUser = async (
   return Object.fromEntries(entries);
 };
 
-const getDocumentReleaseCondition = async (
-  documentId: number
-): Promise<number> => {
+const getDocumentReleaseCondition = async (documentId: number): Promise<number> => {
   await ensureContractDeployed();
   const contract = ensureReadContract();
 
@@ -1265,9 +1248,7 @@ const getDocumentReleaseConditionMap = async (
   return Object.fromEntries(entries);
 };
 
-const getVaultReleaseState = async (
-  vaultId: number
-): Promise<VaultReleaseState> => {
+const getVaultReleaseState = async (vaultId: number): Promise<VaultReleaseState> => {
   await ensureContractDeployed();
   const contract = ensureReadContract();
 
@@ -1303,9 +1284,7 @@ const fetchVaultReleaseStates = async (
   }
 
   const entries = await Promise.all(
-    vaultIds.map(
-      async (vaultId) => [vaultId, await getVaultReleaseState(vaultId)] as const
-    )
+    vaultIds.map(async (vaultId) => [vaultId, await getVaultReleaseState(vaultId)] as const)
   );
 
   return Object.fromEntries(entries);
@@ -1316,43 +1295,160 @@ const configureVaultRelease = async (
   inactivityPeriod: number
 ): Promise<void> => {
   const contract = ensureWriteContract();
-  if (
-    !contractHasFunction(contract, "configureVaultRelease(uint256,uint256)")
-  ) {
-    throw new Error(
-      "Current contract does not support vault release policy configuration."
-    );
+  if (!contractHasFunction(contract, "configureVaultRelease(uint256,uint256)")) {
+    throw new Error("Current contract does not support vault release policy configuration.");
   }
   const tx = await contract.configureVaultRelease(vaultId, inactivityPeriod);
   await waitForReceipt(tx);
 };
 
-const recordProofOfLife = async (vaultId: number): Promise<void> => {
+const recordProofOfLife = async (vaultId: number): Promise<string> => {
   const contract = ensureWriteContract();
   if (!contractHasFunction(contract, "proveLife(uint256)")) {
     throw new Error("Current contract does not support proof-of-life actions.");
   }
   const tx = await contract.proveLife(vaultId);
-  await waitForReceipt(tx);
+  const receipt = await waitForReceipt(tx);
+  if (!receipt?.hash) throw new Error("Proof-of-life transaction was not confirmed");
+  return receipt.hash;
 };
 
-const setEmergencyMode = async (
-  vaultId: number,
-  enabled: boolean
-): Promise<void> => {
+const getVaultGID = async (vaultId: number): Promise<string> => {
+  if (getEcosystem() === "stellar") {
+    return `stellar-testnet:${vaultId}`;
+  }
+  if (!readContract || !contractHasFunction(readContract, "getVaultGID(uint256)")) {
+    throw new Error("Cross-chain vault identity is not supported by this contract");
+  }
+  return String(await readContract.getVaultGID(vaultId));
+};
+
+const setEmergencyMode = async (vaultId: number, enabled: boolean): Promise<void> => {
   const contract = ensureWriteContract();
   if (!contractHasFunction(contract, "setEmergencyMode(uint256,bool)")) {
-    throw new Error(
-      "Current contract does not support emergency mode controls."
-    );
+    throw new Error("Current contract does not support emergency mode controls.");
   }
   const tx = await contract.setEmergencyMode(vaultId, enabled);
   await waitForReceipt(tx);
 };
 
-const fetchPendingInvites = async (
-  user: string
-): Promise<GuardianInviteData[]> => {
+const setBeneficiary = async (vaultId: number, beneficiary: string): Promise<void> => {
+  const contract = ensureWriteContract();
+  if (!contractHasFunction(contract, "setBeneficiary(uint256,address)")) {
+    throw new Error("Current contract does not support beneficiary notifications.");
+  }
+  const tx = await contract.setBeneficiary(vaultId, beneficiary);
+  await waitForReceipt(tx);
+};
+
+const getBeneficiary = async (vaultId: number): Promise<string> => {
+  await ensureContractDeployed();
+  const contract = ensureReadContract();
+
+  if (!contractHasFunction(contract, "getBeneficiary(uint256)")) {
+    return ethers.ZeroAddress;
+  }
+
+  try {
+    return await contract.getBeneficiary(vaultId);
+  } catch {
+    return ethers.ZeroAddress;
+  }
+};
+
+/**
+ * Vault creator signs an EIP-712 "KeeperAuthorization" message off-chain, delegating
+ * proof-of-life heartbeats for `vaultId` to `keeper` until `expiresAt`. Signing costs no
+ * gas; the returned signature is later relayed on-chain (by anyone, typically the keeper
+ * itself) via {relayKeeperAuthorization}.
+ */
+const signKeeperAuthorization = async (
+  vaultId: number,
+  keeper: string,
+  expiresAt: number
+): Promise<string> => {
+  const contract = ensureWriteContract();
+  const signer = contract.runner;
+  if (!signer || typeof (signer as ethers.Signer).signTypedData !== "function") {
+    throw new Error("A connected wallet signer is required to authorize a keeper.");
+  }
+
+  const nonce = await contract.keeperAuthNonces(vaultId);
+  const domain = {
+    name: "SpooVault",
+    version: "1",
+    chainId: getConfiguredChainId(),
+    verifyingContract: getContractAddress(),
+  };
+
+  return (signer as ethers.Signer).signTypedData(domain, KEEPER_AUTHORIZATION_EIP712_TYPES, {
+    vaultId,
+    keeper,
+    expiresAt,
+    nonce,
+  });
+};
+
+/**
+ * Submits a vault creator's signed keeper authorization on-chain. Callable by anyone —
+ * the EIP-712 signature alone proves the creator's consent — so this is typically invoked
+ * by the keeper itself when it first registers to relay a vault's heartbeats.
+ */
+const relayKeeperAuthorization = async (
+  vaultId: number,
+  keeper: string,
+  expiresAt: number,
+  signature: string
+): Promise<void> => {
+  const contract = ensureWriteContract();
+  if (!contractHasFunction(contract, "authorizeKeeperBySig(uint256,address,uint256,bytes)")) {
+    throw new Error("Current contract does not support keeper delegation.");
+  }
+  const tx = await contract.authorizeKeeperBySig(vaultId, keeper, expiresAt, signature);
+  await waitForReceipt(tx);
+};
+
+const revokeKeeper = async (vaultId: number): Promise<void> => {
+  const contract = ensureWriteContract();
+  if (!contractHasFunction(contract, "revokeKeeper(uint256)")) {
+    throw new Error("Current contract does not support keeper delegation.");
+  }
+  const tx = await contract.revokeKeeper(vaultId);
+  await waitForReceipt(tx);
+};
+
+/**
+ * Web3 Keeper (Chainlink Automation / Gelato) relay of a proof-of-life heartbeat,
+ * submitted using the keeper's own signer rather than the vault creator's.
+ */
+const relayProofOfLife = async (vaultId: number): Promise<void> => {
+  const contract = ensureWriteContract();
+  if (!contractHasFunction(contract, "proveLifeByKeeper(uint256)")) {
+    throw new Error("Current contract does not support keeper-relayed heartbeats.");
+  }
+  const tx = await contract.proveLifeByKeeper(vaultId);
+  await waitForReceipt(tx);
+};
+
+const getKeeperAuthorization = async (vaultId: number): Promise<KeeperAuthorizationData | null> => {
+  await ensureContractDeployed();
+  const contract = ensureReadContract();
+  if (!contractHasFunction(contract, "keeperAuthorizations(uint256)")) {
+    return null;
+  }
+  try {
+    const value = await contract.keeperAuthorizations(vaultId);
+    const keeper = String(value.keeper ?? value[0]);
+    if (keeper === ethers.ZeroAddress) {
+      return null;
+    }
+    return { keeper, expiresAt: Number(value.expiresAt ?? value[1]) };
+  } catch {
+    return null;
+  }
+};
+
+const fetchPendingInvites = async (user: string): Promise<GuardianInviteData[]> => {
   if (!user) {
     return [];
   }
@@ -1408,21 +1504,14 @@ const fetchPendingApprovalsForGuardian = async (
     seen.add(requestId);
 
     try {
-      const approvedByGuardian = await contract.hasApprovedRequest(
-        requestId,
-        guardian
-      );
+      const approvedByGuardian = await contract.hasApprovedRequest(requestId, guardian);
       if (approvedByGuardian) {
         continue;
       }
 
       const requestRaw = await contract.accessRequests(requestId);
       const request = normalizeAccessRequest(requestRaw);
-      if (
-        !request.requestId ||
-        request.status !== 0 ||
-        request.expiresAt <= now
-      ) {
+      if (!request.requestId || request.status !== 0 || request.expiresAt <= now) {
         continue;
       }
 
@@ -1477,10 +1566,7 @@ const fetchUserTokens = async (account: string): Promise<TokenData[]> => {
   const mintedLogs = await getEventLogs("NFTMinted", {
     filters: [null, accountLower, null],
   });
-  const mintedByToken = new Map<
-    number,
-    { vaultId: number; blockNumber: number }
-  >();
+  const mintedByToken = new Map<number, { vaultId: number; blockNumber: number }>();
   for (const entry of mintedLogs) {
     const tokenId = Number(entry.parsed.args.tokenId);
     mintedByToken.set(tokenId, {
@@ -1529,10 +1615,7 @@ const fetchUserTokens = async (account: string): Promise<TokenData[]> => {
     .sort((a, b) => b.tokenId - a.tokenId);
 };
 
-const hasVaultToken = async (
-  account: string,
-  vaultId: number
-): Promise<boolean> => {
+const hasVaultToken = async (account: string, vaultId: number): Promise<boolean> => {
   if (!account || !vaultId || vaultId <= 0) return false;
   try {
     await ensureContractDeployed();
@@ -1610,7 +1693,12 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
     getEventLogs("NFTMinted", { tail: perEventTail }),
   ]);
 
-  const allLogs = [...vaultLogs, ...documentLogs, ...requestLogs, ...nftLogs];
+  const allLogs = [
+    ...vaultLogs,
+    ...documentLogs,
+    ...requestLogs,
+    ...nftLogs,
+  ];
 
   allLogs.sort((a, b) => {
     if (a.log.blockNumber !== b.log.blockNumber) {
@@ -1624,10 +1712,7 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
   const limited = allLogs.slice(0, limit);
   const events = await Promise.all(
     limited.map(async (entry) => {
-      const timestamp = await getBlockTimestamp(
-        entry.log.blockNumber,
-        blockCache
-      );
+      const timestamp = await getBlockTimestamp(entry.log.blockNumber, blockCache);
       const name = entry.parsed.name;
       const txHash = entry.log.transactionHash;
 
@@ -1644,9 +1729,7 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
 
       if (name === "DocumentAdded") {
         try {
-          const doc = await contract.documents(
-            Number(entry.parsed.args.documentId)
-          );
+          const doc = await contract.documents(Number(entry.parsed.args.documentId));
           return {
             action: "Document Added",
             actor: doc[4],
@@ -1705,12 +1788,17 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
 
 const getEcosystem = (): "avalanche" | "stellar" => {
   if (typeof window === "undefined") return "avalanche";
-  return (
-    (window.localStorage.getItem("spoovault-ecosystem") as
-      | "avalanche"
-      | "stellar") || "avalanche"
-  );
+  return (window.localStorage.getItem("spoovault-ecosystem") as "avalanche" | "stellar") || "avalanche";
 };
+
+// ---------------------------------------------------------------------------
+// Offline-first integration
+//
+// Reads fall back to the Dexie/IndexedDB cache when the network is down so
+// vault inspection keeps working; writes that fail due to connectivity are
+// persisted into the offline action queue and replayed automatically on
+// reconnect (see services/offline/replay.service.ts).
+// ---------------------------------------------------------------------------
 
 const proxiedCreateVault = async (
   name: string,
@@ -1718,15 +1806,26 @@ const proxiedCreateVault = async (
   guardians: string[],
   approvalThreshold: number
 ): Promise<number> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.createVault(
-      name,
-      description,
-      guardians,
-      approvalThreshold
-    );
+  const run = async (): Promise<number> => {
+    if (getEcosystem() === "stellar") {
+      return stellarService.createVault(name, description, guardians, approvalThreshold);
+    }
+    return createVault(name, description, guardians, approvalThreshold);
+  };
+
+  try {
+    return await run();
+  } catch (error) {
+    if (isNetworkFailure(error)) {
+      await enqueueAction(
+        "create-vault",
+        { name, description, guardians, approvalThreshold },
+        { label: `Vault "${name}"` }
+      );
+      throw new OfflineQueuedError(`vault "${name}" creation`);
+    }
+    throw error;
   }
-  return createVault(name, description, guardians, approvalThreshold);
 };
 
 const proxiedAddDocument = async (
@@ -1738,39 +1837,68 @@ const proxiedAddDocument = async (
   guardiansList?: string[],
   shares?: string[]
 ): Promise<number> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.addDocument(
-      vaultId,
-      encryptedMetadata,
-      ipfsHash,
-      requiredAccess,
-      releaseCondition,
-      guardiansList,
-      shares
-    );
+  const run = async (): Promise<number> => {
+    if (getEcosystem() === "stellar") {
+      return stellarService.addDocument(
+        vaultId,
+        encryptedMetadata,
+        ipfsHash,
+        requiredAccess,
+        releaseCondition,
+        guardiansList,
+        shares
+      );
+    }
+    return addDocument(vaultId, encryptedMetadata, ipfsHash, requiredAccess, releaseCondition, guardiansList, shares);
+  };
+
+  try {
+    return await run();
+  } catch (error) {
+    if (isNetworkFailure(error)) {
+      await enqueueAction(
+        "add-document",
+        {
+          vaultId,
+          encryptedMetadata,
+          ipfsHash,
+          requiredAccess,
+          releaseCondition,
+          guardiansList,
+          shares,
+        },
+        { label: `document upload to vault #${vaultId}` }
+      );
+      throw new OfflineQueuedError("document upload");
+    }
+    throw error;
   }
-  return addDocument(
-    vaultId,
-    encryptedMetadata,
-    ipfsHash,
-    requiredAccess,
-    releaseCondition,
-    guardiansList,
-    shares
-  );
 };
 
 const proxiedRequestAccess = async (documentId: number): Promise<number> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.requestAccess(documentId);
+  const run = async (): Promise<number> => {
+    if (getEcosystem() === "stellar") {
+      return stellarService.requestAccess(documentId);
+    }
+    return requestAccess(documentId);
+  };
+
+  try {
+    return await run();
+  } catch (error) {
+    if (isNetworkFailure(error)) {
+      await enqueueAction(
+        "request-access",
+        { documentId },
+        { label: `access request for document #${documentId}` }
+      );
+      throw new OfflineQueuedError("access request");
+    }
+    throw error;
   }
-  return requestAccess(documentId);
 };
 
-const proxiedApproveAccess = async (
-  requestId: number,
-  encryptedShareForBeneficiary?: string
-): Promise<void> => {
+const proxiedApproveAccess = async (requestId: number, encryptedShareForBeneficiary?: string): Promise<void> => {
   if (getEcosystem() === "stellar") {
     await stellarService.approveAccess(requestId, encryptedShareForBeneficiary);
   } else {
@@ -1795,24 +1923,43 @@ const proxiedAcceptGuardianInvite = async (vaultId: number): Promise<void> => {
 const proxiedFetchVaultsForAccount = async (
   account: string,
   options?: { tokenVaultIds?: number[] }
-): Promise<VaultData[]> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.fetchVaultsForAccount(account) as unknown as Promise<
-      VaultData[]
-    >;
-  }
-  return fetchVaultsForAccount(account, options);
-};
+): Promise<VaultData[]> =>
+  withOfflineFallback({
+    scope: `vaults:${account}`,
+    fetchLive: async () => {
+      if (getEcosystem() === "stellar") {
+        return stellarService.fetchVaultsForAccount(account) as unknown as VaultData[];
+      }
+      return fetchVaultsForAccount(account, options);
+    },
+    readCache: () => readVaultsCache(account, getEcosystem()),
+    writeCache: (vaults) => writeVaultsCache(account, getEcosystem(), vaults),
+  });
 
 const proxiedFetchDocumentsForVaults = async (
-  vaultIds: number[]
+  vaultIds: number[],
+  account?: string
 ): Promise<DocumentData[]> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.fetchDocumentsForVaults(
-      vaultIds
-    ) as unknown as Promise<DocumentData[]>;
-  }
-  return fetchDocumentsForVaults(vaultIds);
+  const network = getEcosystem();
+  const owner = account ?? "";
+
+  return withOfflineFallback({
+    scope: "documents",
+    fetchLive: async () => {
+      if (network === "stellar") {
+        return stellarService.fetchDocumentsForVaults(vaultIds) as unknown as DocumentData[];
+      }
+      return fetchDocumentsForVaults(vaultIds);
+    },
+    readCache: () =>
+      owner
+        ? readDocumentsCache(owner, network)
+        : Promise.resolve([] as DocumentData[]),
+    writeCache: (documents) =>
+      owner
+        ? writeDocumentsCache(owner, network, documents)
+        : Promise.resolve(),
+  });
 };
 
 const proxiedFetchPendingApprovalsForGuardian = async (
@@ -1820,27 +1967,19 @@ const proxiedFetchPendingApprovalsForGuardian = async (
   _limit?: number
 ): Promise<PendingApprovalData[]> => {
   if (getEcosystem() === "stellar") {
-    return stellarService.fetchPendingApprovalsForGuardian(
-      guardianAddress
-    ) as unknown as Promise<PendingApprovalData[]>;
+    return stellarService.fetchPendingApprovalsForGuardian(guardianAddress) as unknown as Promise<PendingApprovalData[]>;
   }
   return fetchPendingApprovalsForGuardian(guardianAddress);
 };
 
-const proxiedGetEncryptedGuardianShare = async (
-  documentId: number,
-  guardian: string
-): Promise<string> => {
+const proxiedGetEncryptedGuardianShare = async (documentId: number, guardian: string): Promise<string> => {
   if (getEcosystem() === "stellar") {
     return stellarService.getEncryptedGuardianShare(documentId, guardian);
   }
   return getEncryptedGuardianShare(documentId, guardian);
 };
 
-const proxiedGetBeneficiaryKeyShare = async (
-  requestId: number,
-  guardian: string
-): Promise<string> => {
+const proxiedGetBeneficiaryKeyShare = async (requestId: number, guardian: string): Promise<string> => {
   if (getEcosystem() === "stellar") {
     return stellarService.getBeneficiaryKeyShare(requestId, guardian);
   }
@@ -1848,30 +1987,55 @@ const proxiedGetBeneficiaryKeyShare = async (
 };
 
 const proxiedRegisterPublicKey = async (publicKey: string): Promise<void> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.registerPublicKey(publicKey);
+  const run = async (): Promise<void> => {
+    if (getEcosystem() === "stellar") {
+      return stellarService.registerPublicKey(publicKey);
+    }
+    return registerPublicKey(publicKey);
+  };
+
+  try {
+    await run();
+  } catch (error) {
+    if (isNetworkFailure(error)) {
+      await enqueueAction(
+        "register-public-key",
+        { publicKey },
+        { label: "encryption public key registration" }
+      );
+      throw new OfflineQueuedError("encryption public key registration");
+    }
+    throw error;
   }
-  return registerPublicKey(publicKey);
 };
 
-const proxiedGetUserPublicKey = async (user: string): Promise<string> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.getUserPublicKey(user);
-  }
-  return getUserPublicKey(user);
-};
+const proxiedGetUserPublicKey = async (user: string): Promise<string> =>
+  withOfflineFallback({
+    scope: `publicKey:${user}`,
+    fetchLive: async () => {
+      if (getEcosystem() === "stellar") {
+        return stellarService.getUserPublicKey(user);
+      }
+      return getUserPublicKey(user);
+    },
+    readCache: () => readPublicKeyCache(user, getEcosystem()),
+    writeCache: (publicKey) => writePublicKeyCache(user, publicKey, getEcosystem()),
+  });
 
-const proxiedFetchPendingInvites = async (account: string): Promise<any[]> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.getPendingInvites(account);
-  }
-  return fetchPendingInvites(account);
-};
+const proxiedFetchPendingInvites = async (account: string): Promise<any[]> =>
+  withOfflineFallback({
+    scope: `invites:${account}`,
+    fetchLive: async () => {
+      if (getEcosystem() === "stellar") {
+        return stellarService.getPendingInvites(account);
+      }
+      return fetchPendingInvites(account);
+    },
+    readCache: () => readInvitesCache(account, getEcosystem()),
+    writeCache: (invites) => writeInvitesCache(account, getEcosystem(), invites),
+  });
 
-const proxiedHasActiveAccess = async (
-  documentId: number,
-  user: string
-): Promise<boolean> => {
+const proxiedHasActiveAccess = async (documentId: number, user: string): Promise<boolean> => {
   if (getEcosystem() === "stellar") {
     const account = stellarService.getAccount();
     if (!account) return false;
@@ -1879,32 +2043,20 @@ const proxiedHasActiveAccess = async (
       `hasActiveAccess:stellar:${documentId}:${account.toLowerCase()}`,
       async () => {
         const vaults = await stellarService.fetchVaultsForAccount(account);
-        const docs = await stellarService.fetchDocumentsForVaults(
-          vaults.map((v) => v.id)
-        );
-        const doc = docs.find((d) => d.id === documentId);
+        const docs = await stellarService.fetchDocumentsForVaults(vaults.map(v => v.id));
+        const doc = docs.find(d => d.id === documentId);
         if (!doc) return false;
         if (doc.uploadedBy.toLowerCase() === account.toLowerCase()) return true;
 
-        const vault = vaults.find((v) => v.id === doc.vaultId);
-        if (
-          vault?.guardians.some(
-            (g) => g.toLowerCase() === account.toLowerCase()
-          )
-        )
-          return true;
+        const vault = vaults.find(v => v.id === doc.vaultId);
+        if (vault?.guardians.some(g => g.toLowerCase() === account.toLowerCase())) return true;
 
         try {
-          const requestsRaw = localStorage.getItem(
-            "spoovault-stellar-mock-requests"
-          );
+          const requestsRaw = localStorage.getItem("spoovault-stellar-mock-requests");
           if (requestsRaw) {
             const requests = JSON.parse(requestsRaw) as any[];
             return requests.some(
-              (r) =>
-                r.documentId === documentId &&
-                r.requester.toLowerCase() === account.toLowerCase() &&
-                r.status === 1
+              r => r.documentId === documentId && r.requester.toLowerCase() === account.toLowerCase() && r.status === 1
             );
           }
         } catch {}
@@ -1921,9 +2073,7 @@ const proxiedGetActiveAccessMap = async (
 ): Promise<Record<number, boolean>> => {
   if (getEcosystem() === "stellar") {
     const entries = await Promise.all(
-      documentIds.map(
-        async (id) => [id, await proxiedHasActiveAccess(id, user)] as const
-      )
+      documentIds.map(async (id) => [id, await proxiedHasActiveAccess(id, user)] as const)
     );
     return Object.fromEntries(entries);
   }
@@ -1936,16 +2086,12 @@ const proxiedGetLatestRequestsForUser = async (
 ): Promise<Record<number, AccessRequestData | null>> => {
   if (getEcosystem() === "stellar") {
     try {
-      const requestsRaw = localStorage.getItem(
-        "spoovault-stellar-mock-requests"
-      );
+      const requestsRaw = localStorage.getItem("spoovault-stellar-mock-requests");
       const requests = requestsRaw ? (JSON.parse(requestsRaw) as any[]) : [];
       const res: Record<number, AccessRequestData | null> = {};
       for (const id of documentIds) {
         const matched = requests.filter(
-          (r) =>
-            r.documentId === id &&
-            r.requester.toLowerCase() === user.toLowerCase()
+          r => r.documentId === id && r.requester.toLowerCase() === user.toLowerCase()
         );
         if (matched.length > 0) {
           matched.sort((a, b) => b.requestId - a.requestId);
@@ -1962,13 +2108,9 @@ const proxiedGetLatestRequestsForUser = async (
   return getLatestRequestsForUser(user, documentIds);
 };
 
-const proxiedFetchUserTokens = async (
-  account: string
-): Promise<TokenData[]> => {
+const proxiedFetchUserTokens = async (account: string): Promise<TokenData[]> => {
   if (getEcosystem() === "stellar") {
-    return stellarService.fetchUserTokens(account) as unknown as Promise<
-      TokenData[]
-    >;
+    return stellarService.fetchUserTokens(account) as unknown as Promise<TokenData[]>;
   }
   return fetchUserTokens(account);
 };
@@ -2032,7 +2174,15 @@ export const contractService = {
   fetchVaultReleaseStates,
   configureVaultRelease,
   recordProofOfLife,
+  getVaultGID,
   setEmergencyMode,
+  setBeneficiary,
+  getBeneficiary,
+  signKeeperAuthorization,
+  relayKeeperAuthorization,
+  revokeKeeper,
+  relayProofOfLife,
+  getKeeperAuthorization,
   fetchPendingApprovalsForGuardian: proxiedFetchPendingApprovalsForGuardian,
   getRecentActivity,
   registerPublicKey: proxiedRegisterPublicKey,

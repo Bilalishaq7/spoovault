@@ -27,6 +27,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -35,10 +36,18 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contracts-stellar/target
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('contracts-stellar/Cargo.lock') }}
+            contracts-stellar/upgrade_fixture/target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('contracts-stellar/Cargo.lock', 'contracts-stellar/upgrade_fixture/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-coverage-
             ${{ runner.os }}-cargo-
+
+      # cargo-tarpaulin wraps `cargo test`, which compiles the
+      # upgrade_contract integration test's `contractimport!` of this
+      # fixture's compiled Wasm - it must exist before tarpaulin runs.
+      - name: Build upgrade_fixture Wasm
+        working-directory: contracts-stellar/upgrade_fixture
+        run: cargo build --release --target wasm32-unknown-unknown
 
       # Installs a prebuilt cargo-tarpaulin binary instead of compiling it
       # from source, keeping this job fast and avoiding an extra multi-minute

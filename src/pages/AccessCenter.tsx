@@ -171,7 +171,8 @@ const AccessCenter = () => {
         contractService.fetchVaultsForAccount(account),
       ]);
       const scopedDocs = await contractService.fetchDocumentsForVaults(
-        visibleVaults.map((vault) => vault.id)
+        visibleVaults.map((vault) => vault.id),
+        account
       );
       const docIds = scopedDocs.map((doc) => doc.id);
       const [accessMap, requestMap] = await Promise.all([

@@ -71,10 +71,10 @@
   "compilation": {
     "platform": "crytic-compile",
     "platformConfig": {
-      "target": "../harness/SpooVaultFuzz.sol",
-      "solcVersion": "0.8.24",
+      "target": "../../fuzz/harness/SpooVaultFuzz.sol",
+      "solcVersion": "",
       "exportDirectory": "",
-      "args": []
+      "args": ["--solc-remaps", "@openzeppelin/=../../node_modules/@openzeppelin/"]
     }
   },
   "slither": {
