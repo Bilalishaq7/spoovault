@@ -89,7 +89,7 @@ jobs:
       - name: Run Medusa campaign
         run: |
           export PATH="$HOME/go/bin:$PATH"
-          medusa fuzz --config fuzz/medusa/medusa.json
+          cd fuzz/medusa && medusa fuzz --config medusa.json
 
   soroban-fuzz:
     name: Soroban proptest (cargo-fuzz / proptest)
