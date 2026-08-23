@@ -80,6 +80,7 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         bool emergencyMode;
         uint256 inactivityPeriod;
         uint256 lastProofOfLife;
+        uint256 lastProofOfLifeBlock;
     }
 
     struct GuardianRemovalProposal {
@@ -101,6 +102,13 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         uint256 createdAt;
         uint256 expiresAt;
     }
+
+    /// @dev Minimum number of blocks that must elapse since the last proof of
+    /// life before post-death conditions can unlock, in addition to the
+    /// timestamp threshold. Guards against miners/validators nudging
+    /// `block.timestamp` within their permitted drift window to trigger an
+    /// early release without real block progression having occurred.
+    uint256 public constant MIN_POST_DEATH_BLOCK_DELTA = 256;
 
     error AtLeastOneGuardian();
     error InvalidApprovalThreshold();
@@ -161,6 +169,17 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     // Access versions let us invalidate all prior document grants for a user+vault in O(1).
     mapping(uint256 => mapping(address => uint256)) private _vaultAccessVersion;
     mapping(uint256 => mapping(address => uint256)) private _documentAccessVersion;
+
+    // Strictly-increasing per (documentId, user) nonce for cross-chain revocation
+    // broadcasts. Lets a relayed message be replay-protected on the receiving
+    // chain independent of any chain-specific block/ledger sequencing.
+    mapping(uint256 => mapping(address => uint256)) public documentRevocationNonce;
+
+    // Opt-in per vault: most vaults are single-chain and should not pay the
+    // extra SSTORE/event gas cost of cross-chain revocation broadcasting on
+    // every revokeAccess call. Only vaults linked to a Soroban counterpart
+    // (via link_cross_chain_vault) need this enabled.
+    mapping(uint256 => bool) public crossChainRevocationEnabled;
     mapping(uint256 => VaultReleaseState) private _vaultReleaseStates;
 
     // Guardian rotation and threshold adjustment governance
@@ -179,6 +198,9 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     event NFTMinted(uint256 indexed tokenId, address indexed to, uint256 indexed vaultId);
     event NFTBurned(uint256 indexed tokenId);
     event AccessRevoked(uint256 indexed documentId, address indexed user);
+    event CrossChainRevocationBroadcast(
+        bytes32 indexed vaultGID, uint256 indexed documentId, address indexed targetUser, uint256 nonce
+    );
     event VaultReleaseConfigured(uint256 indexed vaultId, uint256 inactivityPeriod);
     event ProofOfLifeRecorded(uint256 indexed vaultId, address indexed owner, uint256 timestamp);
     event EmergencyModeUpdated(uint256 indexed vaultId, bool enabled);
@@ -264,7 +286,8 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         _vaultReleaseStates[vaultId] = VaultReleaseState({
             emergencyMode: false,
             inactivityPeriod: 30 days,
-            lastProofOfLife: block.timestamp
+            lastProofOfLife: block.timestamp,
+            lastProofOfLifeBlock: block.number
         });
 
         newVault.guardians.push(msg.sender);
@@ -427,6 +450,7 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         if (!vaults[vaultId].isActive) revert VaultNotActive();
 
         _vaultReleaseStates[vaultId].lastProofOfLife = block.timestamp;
+        _vaultReleaseStates[vaultId].lastProofOfLifeBlock = block.number;
         emit ProofOfLifeRecorded(vaultId, msg.sender, block.timestamp);
     }
 
@@ -649,6 +673,18 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         emit GuardianRemoved(vaultId, guardianToRemove);
     }
 
+    /**
+     * @dev Blocks elapsed since the last recorded proof of life for a vault.
+     */
+    function getBlocksSinceProofOfLife(uint256 vaultId) external view returns (uint256) {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        VaultReleaseState storage state = _vaultReleaseStates[vaultId];
+        if (block.number <= state.lastProofOfLifeBlock) {
+            return 0;
+        }
+        return block.number - state.lastProofOfLifeBlock;
+    }
+
     function _addDocument(
         uint256 vaultId,
         string memory encryptedMetadata,
@@ -780,7 +816,15 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     }
 
     /**
-     * @dev Revoke access from user for a specific document.
+     * @dev Revoke access from user for a specific document. If the vault has
+     *      opted into cross-chain revocation via `setCrossChainRevocationEnabled`,
+     *      also emits a broadcast payload (vaultGID, documentId, targetUser,
+     *      nonce) that a relayer can have the calling guardian sign and
+     *      forward to the linked Soroban vault via `relay_revoke_access`,
+     *      closing the window where a still-cached Stellar-side grant could
+     *      be used after this EVM-side revocation. Disabled by default so
+     *      single-chain vaults don't pay for broadcast infrastructure they
+     *      never use.
      */
     function revokeAccess(uint256 documentId, address user) external nonReentrant {
         if (documents[documentId].id == 0) revert DocumentNotExist();
@@ -793,6 +837,31 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         delete _documentAccessVersion[documentId][user];
 
         emit AccessRevoked(documentId, user);
+
+        if (crossChainRevocationEnabled[vaultId]) {
+            uint256 nonce = ++documentRevocationNonce[documentId][user];
+            emit CrossChainRevocationBroadcast(vaultGID(vaultId), documentId, user, nonce);
+        }
+    }
+
+    /// @notice Globally-unique cross-chain identifier for a vault, derived from
+    ///         this contract's address and the local vault id. A Soroban vault
+    ///         links itself to this id via `link_cross_chain_vault` so relayed
+    ///         revocation broadcasts can be routed to the right vault.
+    function vaultGID(uint256 vaultId) public view returns (bytes32) {
+        return keccak256(abi.encodePacked(address(this), vaultId));
+    }
+
+    /// @notice Opt a vault into (or out of) cross-chain revocation broadcasting.
+    ///         Only the vault creator may toggle this; leave disabled (the
+    ///         default) for vaults with no linked Soroban counterpart so
+    ///         `revokeAccess` doesn't pay for broadcast infrastructure they
+    ///         never use.
+    function setCrossChainRevocationEnabled(uint256 vaultId, bool enabled) external nonReentrant {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
+
+        crossChainRevocationEnabled[vaultId] = enabled;
     }
 
     /**
@@ -818,16 +887,15 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     }
 
     /**
-     * @dev Burn NFT access token and invalidate all prior grants for owner+vault in O(1).
+     * @dev Burn NFT access token. Grant invalidation is handled centrally in
+     * _update, which bumps the vault access version whenever the burner's
+     * balance for the vault drops to zero.
      */
     function burnAccessToken(uint256 tokenId) external nonReentrant {
         address owner = ownerOf(tokenId);
         if (!_isTokenOwnerOrApproved(owner, msg.sender, tokenId)) {
             revert NotOwnerOrApproved();
         }
-
-        uint256 vaultId = tokenVaultMapping[tokenId];
-        _vaultAccessVersion[vaultId][owner] = _currentAccessVersion(vaultId, owner) + 1;
 
         _burn(tokenId);
 
@@ -992,6 +1060,14 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
             }
         }
 
+        // Evaluated after all balance mutations so self-transfers never
+        // transiently read a zero balance. When the sender's balance for this
+        // vault drops to zero, every prior document grant they hold is
+        // invalidated; re-acquiring a pass requires fresh guardian approval.
+        if (from != address(0) && vaultId != 0 && _ownedVaultTokenBalance[from][vaultId] == 0) {
+            _vaultAccessVersion[vaultId][from] += 1;
+        }
+
         return from;
     }
 
@@ -1033,7 +1109,11 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         if (state.inactivityPeriod == 0) {
             return false;
         }
-        return block.timestamp >= state.lastProofOfLife + state.inactivityPeriod;
+
+        bool timestampExpired = block.timestamp >= state.lastProofOfLife + state.inactivityPeriod;
+        bool blocksElapsed = block.number >= state.lastProofOfLifeBlock + MIN_POST_DEATH_BLOCK_DELTA;
+
+        return timestampExpired && blocksElapsed;
     }
 
     function _isReleaseConditionSatisfied(uint256 documentId) internal view returns (bool) {
