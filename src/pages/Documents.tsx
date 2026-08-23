@@ -39,10 +39,10 @@ import {
   generateEncryptionKey,
   isIPFSConfigured,
   shortenAddress,
-  formatDate,
   formatFileSize,
   isValidAddress,
 } from "../utils/helpers";
+import VirtualizedDocumentsList from "../components/documents/VirtualizedDocumentsList";
 import { toast } from "react-hot-toast";
 import { buttonClasses } from "../utils/buttonClasses";
 import { captureError } from "../services/telemetry.service";
@@ -50,6 +50,8 @@ import { keyInboxService } from "../services/keyInbox.service";
 import { keyStoreService } from "../services/keyStore.service";
 import { splitSecretVSS, parseEncryptedMetadataPayload } from "../services/secrets.service";
 import { encryptWithPublicKey } from "../utils/crypto";
+import { enqueueAction } from "../services/offline/offlineQueue.service";
+import { clientKeyringService } from "../services/clientKeyring.service";
 import {
   collectStream,
   decryptStream,
@@ -98,6 +100,19 @@ const decryptLegacyCiphertext = async (
   const decryptedWordArray = CryptoJS.AES.decrypt(encryptedText, key);
   return wordArrayToUint8Array(decryptedWordArray);
 };
+
+const fileToBase64 = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const commaIndex = result.indexOf(",");
+      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+    };
+    reader.onerror = () =>
+      reject(new Error("Failed to read file for offline draft"));
+    reader.readAsDataURL(file);
+  });
 
 const Documents = () => {
   const { isOpen, onOpen, onClose } = useDisclosure();
@@ -182,7 +197,8 @@ const Documents = () => {
     try {
       const vaultsData = await contractService.fetchVaultsForAccount(account);
       const docsData = await contractService.fetchDocumentsForVaults(
-        vaultsData.map((vault) => vault.id)
+        vaultsData.map((vault) => vault.id),
+        account
       );
 
       const accountLower = account.toLowerCase();
@@ -677,6 +693,57 @@ const Documents = () => {
         encryptedShares.push(encrypted);
       }
 
+      // Offline draft capture: everything up to this point is client-side, so
+      // persist the fully-encrypted payload into the offline queue. On
+      // reconnect the replay service pins it to IPFS and submits the on-chain
+      // transaction automatically.
+      if (!navigator.onLine) {
+        if (!account) {
+          throw new Error("Connect your wallet to queue uploads while offline.");
+        }
+        const ownerPublicKey = await clientKeyringService.getStoredPublicKey(account);
+        if (!ownerPublicKey) {
+          throw new Error(
+            "Generate your encryption key in Profile to enable offline drafts."
+          );
+        }
+
+        setUploadStage("uploading_ipfs");
+        const encryptedDocKey = await encryptWithPublicKey(key, ownerPublicKey);
+        const encryptedFileBase64 = await fileToBase64(selectedFile);
+
+        await enqueueAction(
+          "create-document-draft",
+          {
+            account,
+            vaultId: selectedVaultId,
+            vaultName: vault.name,
+            fileName: selectedFile.name,
+            fileSize: selectedFile.size,
+            fileType: selectedFile.type,
+            lastModified: selectedFile.lastModified,
+            encryptedMetadata,
+            encryptedFileBase64,
+            encryptedDocKey,
+            requiredAccess: accessLevel,
+            releaseCondition,
+            guardiansList: vault.guardians,
+            shares: encryptedShares,
+          },
+          { label: `Draft "${selectedFile.name}"` }
+        );
+
+        toast.success(
+          `Offline draft saved — "${selectedFile.name}" will upload automatically when you reconnect.`
+        );
+        setSelectedFile(null);
+        setSelectedVaultId(null);
+        setAccessLevel(0);
+        setReleaseCondition(0);
+        onClose();
+        return;
+      }
+
       setUploadStage("uploading_ipfs");
       // Stream AES-GCM chunked ciphertext directly to Pinata/IPFS (O(chunk) RAM).
       const ipfsResult = await encryptAndUploadFile(selectedFile, key, {
@@ -750,14 +817,14 @@ const Documents = () => {
 
     const response = await fetchFromIPFS(doc.ipfsHash);
 
-    const { isStreaming, stream } = await detectStreamingCiphertext(response.body);
+    const { isStreaming, stream } = await detectStreamingCiphertext(response.body as any);
     const metadata = decryptMetadata(doc);
     const name = metadata?.name || `document-${doc.id}`;
     const type = metadata?.type || "application/octet-stream";
 
-    if (isStreaming) {
+    if (isStreaming && stream) {
       const cryptoKey = await importStreamingKey(key);
-      const decrypted = decryptStream(stream, cryptoKey);
+      const decrypted = decryptStream(stream as any, cryptoKey);
       return { mode: "streaming" as const, decrypted, name, type };
     }
 

@@ -153,7 +153,8 @@ const AccessCenter = () => {
         contractService.fetchVaultsForAccount(account),
       ]);
       const scopedDocs = await contractService.fetchDocumentsForVaults(
-        visibleVaults.map((vault) => vault.id)
+        visibleVaults.map((vault) => vault.id),
+        account
       );
       const docIds = scopedDocs.map((doc) => doc.id);
       const [accessMap, requestMap] = await Promise.all([
@@ -582,14 +583,14 @@ const AccessCenter = () => {
 
     const response = await fetchFromIPFS(doc.ipfsHash);
 
-    const { isStreaming, stream } = await detectStreamingCiphertext(response.body);
+    const { isStreaming, stream } = await detectStreamingCiphertext(response.body as any);
     const metadata = decryptMetadata(doc);
     const name = metadata?.name || `document-${doc.id}`;
     const type = metadata?.type || "application/octet-stream";
 
-    if (isStreaming) {
+    if (isStreaming && stream) {
       const cryptoKey = await importStreamingKey(key);
-      const decrypted = decryptStream(stream, cryptoKey);
+      const decrypted = decryptStream(stream as any, cryptoKey);
       return { mode: "streaming" as const, decrypted, name, type };
     }
 
