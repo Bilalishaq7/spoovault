@@ -176,12 +176,12 @@ describe("GatewayHealthScorer", () => {
 describe("IpfsGatewayService", () => {
   let scorer: GatewayHealthScorer;
   let service: IpfsGatewayService;
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let fetchSpy: any;
 
   beforeEach(() => {
     scorer = freshScorer([GW_A, GW_B, GW_C]);
     service = new IpfsGatewayService(scorer);
-    fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy = vi.spyOn(globalThis, "fetch") as any;
   });
 
   afterEach(() => {

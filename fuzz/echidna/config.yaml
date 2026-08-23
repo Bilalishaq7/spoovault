@@ -14,3 +14,6 @@ cryticArgs:
   - "/src/solc-static-linux"
   - "--solc-remaps"
   - "@openzeppelin/=/src/node_modules/@openzeppelin/"
+  - "--solc-args"
+  - "--evm-version cancun"
+
