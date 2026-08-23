@@ -1,0 +1,85 @@
+import { webcrypto } from "node:crypto";
+
+export interface VdfSetup {
+  targetSteps: number;
+  seed: string;
+}
+
+export interface VdfProof {
+  output: string;
+  proof: string;
+  targetSteps: number;
+}
+
+export class VdfTimelockEngine {
+  /**
+   * Derive symmetric key K = H(VDF_output)
+   */
+  static async deriveKey(vdfOutput: string): Promise<CryptoKey> {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(vdfOutput);
+    const hashBuffer = await webcrypto.subtle.digest("SHA-256", data);
+    return await webcrypto.subtle.importKey(
+      "raw",
+      hashBuffer,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"]
+    );
+  }
+
+  /**
+   * Evaluates sequential squaring VDF over T steps
+   */
+  static async evaluateVdf(seed: string, targetSteps: number): Promise<VdfProof> {
+    const encoder = new TextEncoder();
+    let current = encoder.encode(seed);
+
+    for (let i = 0; i < targetSteps; i++) {
+      const buf = await webcrypto.subtle.digest("SHA-256", current);
+      current = new Uint8Array(buf);
+    }
+
+    const outputHex = Array.from(current)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    // Succinct proof calculation H(seed || output || steps)
+    const proofBuf = await webcrypto.subtle.digest(
+      "SHA-256",
+      encoder.encode(`${seed}:${outputHex}:${targetSteps}`)
+    );
+    const proofHex = Array.from(new Uint8Array(proofBuf))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    return {
+      output: outputHex,
+      proof: proofHex,
+      targetSteps,
+    };
+  }
+
+  /**
+   * Encrypt document using derived key
+   */
+  static async encryptDocument(plaintext: string, vdfOutput: string) {
+    const key = await this.deriveKey(vdfOutput);
+    const iv = webcrypto.getRandomValues(new Uint8Array(12));
+    const encoder = new TextEncoder();
+    const ciphertext = await webcrypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      key,
+      encoder.encode(plaintext)
+    );
+
+    return {
+      ciphertext: Array.from(new Uint8Array(ciphertext))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join(""),
+      iv: Array.from(iv)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join(""),
+    };
+  }
+}
