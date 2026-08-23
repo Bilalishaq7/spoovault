@@ -39,12 +39,13 @@ import { useWeb3 } from "../context/Web3Context";
 import {
   contractService,
   VaultData,
-  DocumentData,
   VaultReleaseState,
 } from "../services/contract.service";
+import { shortenAddress, isValidAddress, isValidMultiChainAddress, formatDate, getVaultGID, buildVaultDocumentCounts, keyRecordByVaultGID } from "../utils/helpers";
+import { identityService } from "../services/identity.service";
 import { toast } from "react-hot-toast";
-import { shortenAddress, isValidAddress, formatDate, getVaultGID } from "../utils/helpers";
 import { buttonClasses } from "../utils/buttonClasses";
+import { pushNotificationService } from "../services/pushNotification.service";
 
 interface Vault extends VaultData {
   gid: string;
@@ -72,6 +73,7 @@ const Vaults = () => {
     newGuardian: "",
     approvalThreshold: 1,
     inactivityDays: 30,
+    beneficiaryAddress: "",
   });
 
   useEffect(() => {
@@ -79,6 +81,13 @@ const Vaults = () => {
       onOpen();
     }
   }, [searchParams, onOpen]);
+
+  useEffect(() => {
+    setVaults([]);
+    setReleaseStatesByVault({});
+    setLoading(true);
+  }, [ecosystem]);
+
 
   useEffect(() => {
     if (isConnected && ((provider && signer && isFujiNetwork) || ecosystem === "stellar")) {
@@ -105,37 +114,28 @@ const Vaults = () => {
     try {
       const vaultsData = await contractService.fetchVaultsForAccount(account);
       const docsData = await contractService.fetchDocumentsForVaults(
-        vaultsData.map((vault) => vault.id)
+        vaultsData.map((vault) => vault.id),
+        account
       );
 
       const visibleVaults = vaultsData;
 
-      const visibleVaultSet = new Set<number>(visibleVaults.map((vault) => vault.id));
-      const docCounts: Record<number, number> = {};
-      docsData.forEach((doc: DocumentData) => {
-        if (visibleVaultSet.has(doc.vaultId)) {
-          docCounts[doc.vaultId] = (docCounts[doc.vaultId] || 0) + 1;
-        }
-      });
+      const docCounts = buildVaultDocumentCounts(ecosystem, chainId, visibleVaults, docsData);
 
-      const enriched: Vault[] = visibleVaults.map((vault) => ({
-        ...vault,
-        gid: getVaultGID(ecosystem, chainId, vault.id),
-        documentCount: docCounts[vault.id] || 0,
-      }));
+      const enriched: Vault[] = visibleVaults.map((vault) => {
+        const gid = getVaultGID(ecosystem, chainId, vault.id);
+        return {
+          ...vault,
+          gid,
+          documentCount: docCounts[gid] || 0,
+        };
+      });
 
       setVaults(enriched);
       const releaseStates = await contractService.fetchVaultReleaseStates(
         visibleVaults.map((vault) => vault.id)
       );
-      const keyedReleaseStates: Record<string, VaultReleaseState> = {};
-      Object.entries(releaseStates).forEach(([vaultIdStr, state]) => {
-        const numId = Number(vaultIdStr);
-        const gid = getVaultGID(ecosystem, chainId, numId);
-        keyedReleaseStates[gid] = state;
-        keyedReleaseStates[vaultIdStr] = state;
-      });
-      setReleaseStatesByVault(keyedReleaseStates);
+      setReleaseStatesByVault(keyRecordByVaultGID(ecosystem, chainId, releaseStates));
     } catch (error) {
       console.error("Error loading vaults:", error);
       const message = error instanceof Error ? error.message : "Failed to load vaults";
@@ -148,29 +148,44 @@ const Vaults = () => {
     }
   };
 
-  const handleAddGuardian = () => {
-    if (!formData.newGuardian.trim()) {
+  const handleAddGuardian = async () => {
+    const rawInput = formData.newGuardian.trim();
+    if (!rawInput) {
       toast.error("Please enter a guardian address");
       return;
     }
 
-    if (!isValidAddress(formData.newGuardian)) {
-      toast.error("Invalid Ethereum address");
+    if (!isValidMultiChainAddress(rawInput)) {
+      toast.error("Invalid address format. Enter an EVM address (0x...) or Stellar address (G...).");
       return;
     }
 
-    if (formData.guardians.includes(formData.newGuardian)) {
+    let resolvedAddress = rawInput;
+    const targetNetwork = ecosystem === "stellar" ? "stellar" : "avalanche";
+
+    try {
+      resolvedAddress = await identityService.resolveAddressForNetwork(rawInput, targetNetwork);
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to resolve guardian address for network");
+      return;
+    }
+
+    if (formData.guardians.includes(resolvedAddress)) {
       toast.error("Guardian already added");
       return;
     }
 
     setFormData({
       ...formData,
-      guardians: [...formData.guardians, formData.newGuardian],
+      guardians: [...formData.guardians, resolvedAddress],
       newGuardian: "",
     });
 
-    toast.success("Guardian added");
+    if (resolvedAddress !== rawInput) {
+      toast.success(`Guardian resolved and added as ${shortenAddress(resolvedAddress, 6)}`);
+    } else {
+      toast.success("Guardian added");
+    }
   };
 
   const handleRemoveGuardian = (address: string) => {
@@ -207,11 +222,22 @@ const Vaults = () => {
       return;
     }
 
+    if (!formData.beneficiaryAddress.trim()) {
+      toast.error("A beneficiary wallet address is required");
+      return;
+    }
+
+    if (!isValidAddress(formData.beneficiaryAddress, "avalanche")) {
+      toast.error("Invalid beneficiary Ethereum address");
+      return;
+    }
+
     const draftForm = {
       ...formData,
       name: formData.name.trim(),
       description: formData.description.trim(),
       guardians: [...formData.guardians],
+      beneficiaryAddress: formData.beneficiaryAddress.trim(),
     };
 
     setCreating(true);
@@ -243,7 +269,7 @@ const Vaults = () => {
           documentCount: 0,
         };
         setVaults((prev: Vault[]) => {
-          const existingIndex = prev.findIndex((vault: Vault) => vault.gid === gid || vault.id === vaultId);
+          const existingIndex = prev.findIndex((vault: Vault) => vault.gid === gid);
           if (existingIndex >= 0) {
             const copy = [...prev];
             copy[existingIndex] = optimisticVault;
@@ -259,12 +285,7 @@ const Vaults = () => {
             lastProofOfLife: nowTs,
             postDeathUnlocked: false,
           },
-          [vaultId]: {
-            emergencyMode: false,
-            inactivityPeriod: draftForm.inactivityDays * 24 * 60 * 60,
-            lastProofOfLife: nowTs,
-            postDeathUnlocked: false,
-          },
+          
         }));
         try {
           await contractService.configureVaultRelease(
@@ -279,6 +300,16 @@ const Vaults = () => {
               : "Vault created, but release policy setup was skipped";
           toast.error(policyMessage);
         }
+
+        try {
+          await contractService.setBeneficiary(vaultId, draftForm.beneficiaryAddress);
+        } catch (beneficiaryError) {
+          const beneficiaryMessage =
+            beneficiaryError instanceof Error
+              ? beneficiaryError.message
+              : "Vault created, but beneficiary setup was skipped";
+          toast.error(beneficiaryMessage);
+        }
       }
 
       setFormData({
@@ -288,6 +319,7 @@ const Vaults = () => {
         newGuardian: "",
         approvalThreshold: 1,
         inactivityDays: 30,
+        beneficiaryAddress: "",
       });
 
       onClose();
@@ -304,6 +336,14 @@ const Vaults = () => {
     try {
       await contractService.setEmergencyMode(vaultId, enabled);
       toast.success(enabled ? "Emergency mode enabled" : "Emergency mode disabled");
+
+      try {
+        const beneficiary = await contractService.getBeneficiary(vaultId);
+        await pushNotificationService.notifyEmergencyModeChange(vaultId, beneficiary, enabled);
+      } catch (notifyError) {
+        console.error("Failed to send beneficiary push notification:", notifyError);
+      }
+
       await loadVaults();
     } catch (error: any) {
       toast.error(error.message || "Failed to update emergency mode");
@@ -512,7 +552,7 @@ const Vaults = () => {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredVaults.map((vault: Vault) => {
-            const releaseState = releaseStatesByVault[vault.gid] ?? releaseStatesByVault[vault.id] ?? {
+            const releaseState = releaseStatesByVault[vault.gid] ?? {
               emergencyMode: false,
               inactivityPeriod: 30 * 24 * 60 * 60,
               lastProofOfLife: vault.createdAt,
@@ -731,7 +771,7 @@ const Vaults = () => {
                   <div className="space-y-1">
                     <p className="text-xs text-gray-300 font-medium">Guardian Address</p>
                   <Input
-                    placeholder="Enter guardian's Ethereum address"
+                    placeholder={ecosystem === "stellar" ? "Enter guardian's Stellar address" : "Enter guardian's Ethereum address"}
                     value={formData.newGuardian}
                     onValueChange={(value: string) => setFormData({ ...formData, newGuardian: value })}
                     classNames={modalInputClassNames}
@@ -888,6 +928,29 @@ const Vaults = () => {
                     <span>7 days</span>
                     <span>180 days</span>
                   </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-gray-800/85 bg-gray-900/78 p-4 sm:p-5 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-semibold">Beneficiary</p>
+                    <p className="text-xs text-gray-400">
+                      Wallet address notified when this vault enters emergency mode or unlocks post-death
+                    </p>
+                  </div>
+                  <Chip size="sm" variant="flat" className={stepChipClass}>
+                    Step 5
+                  </Chip>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-xs text-gray-300 font-medium">Beneficiary Address</p>
+                  <Input
+                    placeholder="Enter beneficiary's Ethereum address"
+                    value={formData.beneficiaryAddress}
+                    onValueChange={(value: string) => setFormData({ ...formData, beneficiaryAddress: value })}
+                    classNames={modalInputClassNames}
+                  />
                 </div>
               </div>
 

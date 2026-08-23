@@ -3,9 +3,11 @@ import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import { HeroUIProvider } from "@heroui/react";
 import { Toaster } from "react-hot-toast";
 import { captureError } from "./services/telemetry.service";
+import { SessionLockGate } from "./components/SessionLockGate";
 
 const LandingPage = lazy(() => import("./pages/LandingPage"));
 const Dashboard = lazy(() => import("./pages/Dashboard"));
+const AnalyticsDashboard = lazy(() => import("./pages/AnalyticsDashboard"));
 const Vaults = lazy(() => import("./pages/Vaults"));
 const Documents = lazy(() => import("./pages/Documents"));
 const NFTGallery = lazy(() => import("./pages/NFTGallery"));
@@ -31,15 +33,22 @@ function App() {
 
   useEffect(() => {
     const onError = (event: ErrorEvent) => {
-      captureError("window.error", event.error || event.message || "Unhandled window error", {
-        filename: event.filename,
-        lineno: event.lineno,
-        colno: event.colno,
-      });
+      captureError(
+        "window.error",
+        event.error || event.message || "Unhandled window error",
+        {
+          filename: event.filename,
+          lineno: event.lineno,
+          colno: event.colno,
+        }
+      );
     };
 
     const onUnhandledRejection = (event: PromiseRejectionEvent) => {
-      captureError("window.unhandledrejection", event.reason || "Unhandled promise rejection");
+      captureError(
+        "window.unhandledrejection",
+        event.reason || "Unhandled promise rejection"
+      );
     };
 
     window.addEventListener("error", onError);
@@ -65,6 +74,7 @@ function App() {
             <Route path="/" element={<LandingPage />} />
             <Route element={<AppLayout />}>
               <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/analytics" element={<AnalyticsDashboard />} />
               <Route path="/vaults" element={<Vaults />} />
               <Route path="/documents" element={<Documents />} />
               <Route path="/access" element={<AccessCenter />} />
@@ -85,10 +95,10 @@ function App() {
             },
           }}
         />
+        <SessionLockGate />
       </Router>
     </HeroUIProvider>
   );
 }
 
 export default App;
-

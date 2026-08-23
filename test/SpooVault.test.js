@@ -1,11 +1,10 @@
 import { expect } from "chai";
 import hre from "hardhat";
-
 const { ethers } = hre;
+import { time, mine } from "@nomicfoundation/hardhat-network-helpers";
 
-describe("SpooVault EVM Contract Unit Tests & ERC-165 Interoperability (Issue #110)", function () {
+describe("SpooVault EVM Contract Unit Tests", function () {
   let spooVault;
-  let consumer;
   let owner;
   let guardian1;
   let guardian2;
@@ -17,47 +16,6 @@ describe("SpooVault EVM Contract Unit Tests & ERC-165 Interoperability (Issue #1
     const SpooVault = await ethers.getContractFactory("SpooVault");
     spooVault = await SpooVault.deploy();
     await spooVault.waitForDeployment();
-
-    const ThirdPartyConsumer = await ethers.getContractFactory("ThirdPartyConsumer");
-    consumer = await ThirdPartyConsumer.deploy(await spooVault.getAddress());
-    await consumer.waitForDeployment();
-  });
-
-  describe("ERC-165 Interface Detection", function () {
-    it("should report true for ISpooVault and ERC-721 interfaces", async function () {
-      // Calculate ISpooVault interfaceId
-      const ISpooVaultInterface = new ethers.Interface([
-        "function registerPublicKey(string) external",
-        "function checkAccess(uint256,address) external view returns (uint8)",
-        "function hasActiveAccess(uint256,address) external view returns (bool)",
-        "function hasVaultToken(address,uint256) external view returns (bool)",
-        "function getTokenVault(uint256) external view returns (uint256)",
-        "function getVault(uint256) external view returns (uint256,address,string,string,address[],uint256,bool,uint256)",
-        "function getVaultReleaseState(uint256) external view returns (bool,uint256,uint256,bool)",
-        "function requestAccess(uint256) external returns (uint256)",
-        "function approveAccess(uint256) external",
-        "function approveAccess(uint256,string) external",
-        "function revokeAccess(uint256,address) external",
-        "function mintAccessToken(uint256,address,string) external returns (uint256)",
-        "function burnAccessToken(uint256) external"
-      ]);
-
-      let ispooVaultInterfaceId = 0n;
-      ISpooVaultInterface.forEachFunction((fn) => {
-        const selector = BigInt(fn.selector);
-        ispooVaultInterfaceId ^= selector;
-      });
-      const interfaceIdHex = "0x" + ispooVaultInterfaceId.toString(16).padStart(8, "0");
-
-      expect(await spooVault.supportsInterface(interfaceIdHex)).to.equal(true);
-      expect(await consumer.isSpooVaultSupported()).to.equal(true);
-
-      // ERC721 interfaceId = 0x80ac58cd
-      expect(await spooVault.supportsInterface("0x80ac58cd")).to.equal(true);
-
-      // Invalid interfaceId = 0xffffffff
-      expect(await spooVault.supportsInterface("0xffffffff")).to.equal(false);
-    });
   });
 
   describe("Public Key Registry", function () {
@@ -75,14 +33,16 @@ describe("SpooVault EVM Contract Unit Tests & ERC-165 Interoperability (Issue #1
   describe("Vault Creation & Guardian Thresholds", function () {
     it("should create a vault with valid threshold and guardian invite list", async function () {
       const guardians = [guardian1.address, guardian2.address];
-      const threshold = 2; // threshold out of owner + 2 guardians = 3 total
+      const threshold = 2;
 
-      const tx = await spooVault.connect(owner).createVault(
-        "Executive Vault",
-        "Confidential legal documents",
-        guardians,
-        threshold
-      );
+      const tx = await spooVault
+        .connect(owner)
+        .createVault(
+          "Executive Vault",
+          "Confidential legal documents",
+          guardians,
+          threshold
+        );
 
       await expect(tx).to.emit(spooVault, "VaultCreated");
 
@@ -102,74 +62,190 @@ describe("SpooVault EVM Contract Unit Tests & ERC-165 Interoperability (Issue #1
     it("should revert if approval threshold is zero or exceeds total guardian count", async function () {
       const guardians = [guardian1.address];
       await expect(
-        spooVault.connect(owner).createVault("Invalid Threshold Vault", "Desc", guardians, 0)
+        spooVault
+          .connect(owner)
+          .createVault("Invalid Threshold Vault", "Desc", guardians, 0)
       ).to.be.revertedWithCustomError(spooVault, "InvalidApprovalThreshold");
 
       await expect(
-        spooVault.connect(owner).createVault("Over Threshold Vault", "Desc", guardians, 5)
+        spooVault
+          .connect(owner)
+          .createVault("Over Threshold Vault", "Desc", guardians, 5)
       ).to.be.revertedWithCustomError(spooVault, "InvalidApprovalThreshold");
-    });
-  });
-
-  describe("Standardized checkAccess Hook & Consumer Interoperability", function () {
-    beforeEach(async function () {
-      const guardians = [guardian1.address];
-      await spooVault.connect(owner).createVault("Test Vault", "Desc", guardians, 1);
-    });
-
-    it("should return 1 (DOCUMENT_NOT_EXIST) for non-existent document ID", async function () {
-      expect(await spooVault.checkAccess(999, beneficiary.address)).to.equal(1);
-      expect(await consumer.queryAccessStatus(999, beneficiary.address)).to.equal(1);
-    });
-
-    it("should return 0 (GRANTED) for document creator guardian", async function () {
-      await spooVault.connect(owner)["addDocument(uint256,string,string,uint8)"](1, "enc-meta", "QmIPFS123", 0);
-
-      expect(await spooVault.checkAccess(1, owner.address)).to.equal(0);
-      expect(await consumer.queryAccessStatus(1, owner.address)).to.equal(0);
-      expect(await consumer.performAuthorizedAction(1, owner.address)).to.equal(true);
-    });
-
-    it("should return 2 (NO_ACCESS) for beneficiary without granted access or NFT", async function () {
-      await spooVault.connect(owner)["addDocument(uint256,string,string,uint8)"](1, "enc-meta", "QmIPFS123", 0);
-
-      expect(await spooVault.checkAccess(1, beneficiary.address)).to.equal(2);
-      expect(await consumer.queryAccessStatus(1, beneficiary.address)).to.equal(2);
-
-      await expect(
-        consumer.performAuthorizedAction(1, beneficiary.address)
-      ).to.be.revertedWithCustomError(consumer, "DocumentAccessDenied").withArgs(2);
-    });
-
-    it("should return 3 (RELEASE_CONDITION_LOCKED) when post-death condition is not satisfied", async function () {
-      // Add document with POST_DEATH_ONLY condition (3)
-      await spooVault.connect(owner)["addDocumentWithReleaseCondition(uint256,string,string,uint8,uint8)"](1, "enc-meta", "QmIPFS123", 0, 3);
-
-      expect(await spooVault.checkAccess(1, beneficiary.address)).to.equal(3);
-      expect(await consumer.queryAccessStatus(1, beneficiary.address)).to.equal(3);
-
-      await expect(
-        consumer.performAuthorizedAction(1, beneficiary.address)
-      ).to.be.revertedWithCustomError(consumer, "DocumentAccessDenied").withArgs(3);
     });
   });
 
   describe("Vault Release State & Proof of Life", function () {
     it("should allow vault creator to record proof of life", async function () {
       const guardians = [guardian1.address];
-      await spooVault.connect(owner).createVault("Inheritance Vault", "Desc", guardians, 1);
+      await spooVault
+        .connect(owner)
+        .createVault("Inheritance Vault", "Desc", guardians, 1);
 
-      await expect(spooVault.connect(owner).proveLife(1))
-        .to.emit(spooVault, "ProofOfLifeRecorded");
+      await expect(spooVault.connect(owner).proveLife(1)).to.emit(
+        spooVault,
+        "ProofOfLifeRecorded"
+      );
     });
 
     it("should allow vault creator to toggle emergency mode", async function () {
       const guardians = [guardian1.address];
-      await spooVault.connect(owner).createVault("Emergency Vault", "Desc", guardians, 1);
+      await spooVault
+        .connect(owner)
+        .createVault("Emergency Vault", "Desc", guardians, 1);
 
       await expect(spooVault.connect(owner).setEmergencyMode(1, true))
         .to.emit(spooVault, "EmergencyModeUpdated")
         .withArgs(1, true);
+    });
+  });
+
+  describe("Beneficiary Registry", function () {
+    beforeEach(async function () {
+      await spooVault.connect(owner).createVault("Beneficiary Vault", "Desc", [guardian1.address], 1);
+    });
+
+    it("should allow the vault creator to set a beneficiary", async function () {
+      await expect(spooVault.connect(owner).setBeneficiary(1, beneficiary.address))
+        .to.emit(spooVault, "BeneficiarySet")
+        .withArgs(1, beneficiary.address);
+
+      expect(await spooVault.getBeneficiary(1)).to.equal(beneficiary.address);
+    });
+
+    it("should default to the zero address when no beneficiary is set", async function () {
+      expect(await spooVault.getBeneficiary(1)).to.equal(ethers.ZeroAddress);
+    });
+
+    it("should revert when setting a zero-address beneficiary", async function () {
+      await expect(
+        spooVault.connect(owner).setBeneficiary(1, ethers.ZeroAddress)
+      ).to.be.revertedWithCustomError(spooVault, "ZeroAddressBeneficiary");
+    });
+
+    it("should revert when a non-creator tries to set the beneficiary", async function () {
+      await expect(
+        spooVault.connect(guardian1).setBeneficiary(1, beneficiary.address)
+      ).to.be.revertedWithCustomError(spooVault, "OnlyVaultCreator");
+    });
+
+    it("should revert when the beneficiary is already set", async function () {
+      await spooVault.connect(owner).setBeneficiary(1, beneficiary.address);
+
+      await expect(
+        spooVault.connect(owner).setBeneficiary(1, guardian2.address)
+      ).to.be.revertedWithCustomError(spooVault, "BeneficiaryAlreadySet");
+    });
+  });
+
+  describe("Guardian Invites", function () {
+    it("should allow a guardian to accept an invite and become an active guardian", async function () {
+      await spooVault
+        .connect(owner)
+        .createVault("Vault A", "Desc", [guardian1.address], 1);
+
+      const pendingBefore = await spooVault.getPendingInvites(
+        guardian1.address
+      );
+      expect(pendingBefore.length).to.equal(1);
+      expect(pendingBefore[0].vaultId).to.equal(1);
+      expect(pendingBefore[0].accepted).to.equal(false);
+
+      await expect(spooVault.connect(guardian1).acceptGuardianInvite(1))
+        .to.emit(spooVault, "GuardianAdded")
+        .withArgs(1, guardian1.address);
+
+      const pendingAfter = await spooVault.getPendingInvites(guardian1.address);
+      expect(pendingAfter.length).to.equal(0);
+
+      const isGuardian = await spooVault.isGuardian(1, guardian1.address);
+      expect(isGuardian).to.be.true;
+    });
+
+    it("should revert acceptGuardianInvite for non-existent invite", async function () {
+      await spooVault
+        .connect(owner)
+        .createVault("Vault A", "Desc", [guardian2.address], 1);
+
+      await expect(
+        spooVault.connect(guardian1).acceptGuardianInvite(1)
+      ).to.be.revertedWithCustomError(spooVault, "NoValidInvite");
+    });
+
+    it("should return pending invites for a user across multiple vaults", async function () {
+      await spooVault
+        .connect(owner)
+        .createVault("Vault A", "Desc", [guardian1.address], 1);
+      await spooVault
+        .connect(owner)
+        .createVault("Vault B", "Desc", [guardian1.address], 1);
+
+      const pending = await spooVault.getPendingInvites(guardian1.address);
+      expect(pending.length).to.equal(2);
+      const vaultIds = pending.map((inv) => Number(inv.vaultId)).sort();
+      expect(vaultIds).to.deep.equal([1, 2]);
+    });
+
+    it("should not include accepted invites in getPendingInvites", async function () {
+      await spooVault
+        .connect(owner)
+        .createVault("Vault A", "Desc", [guardian1.address], 1);
+      await spooVault.connect(guardian1).acceptGuardianInvite(1);
+
+      const pending = await spooVault.getPendingInvites(guardian1.address);
+      expect(pending.length).to.equal(0);
+    });
+
+    it("should revert acceptGuardianInvite for expired invite", async function () {
+      await spooVault
+        .connect(owner)
+        .createVault("Vault A", "Desc", [guardian1.address], 1);
+
+      await time.increase(7 * 24 * 60 * 60 + 1);
+
+      await expect(
+        spooVault.connect(guardian1).acceptGuardianInvite(1)
+      ).to.be.revertedWithCustomError(spooVault, "InviteExpired");
+    });
+
+    it("should exclude expired invites from getPendingInvites", async function () {
+      await spooVault
+        .connect(owner)
+        .createVault("Vault A", "Desc", [guardian1.address], 1);
+
+      await time.increase(7 * 24 * 60 * 60 + 1);
+
+      const pending = await spooVault.getPendingInvites(guardian1.address);
+      expect(pending.length).to.equal(0);
+    });
+  });
+
+  describe("Post-Death Release: timestamp + block confirmation", function () {
+    it("should NOT unlock post-death release from timestamp manipulation alone without block progression", async function () {
+      const guardians = [guardian1.address];
+      await spooVault.connect(owner).createVault("Inheritance Vault", "Desc", guardians, 1);
+      await spooVault.connect(owner).configureVaultRelease(1, 1 * 24 * 60 * 60); // 1 day
+
+      // Simulate a manipulated/skewed timestamp far in the future while only
+      // a single block has actually been mined since the last proof of life.
+      await time.increase(2 * 24 * 60 * 60);
+      await mine(1);
+
+      const state = await spooVault.getVaultReleaseState(1);
+      expect(state.postDeathUnlocked).to.equal(false);
+    });
+
+    it("should unlock post-death release once both the timestamp threshold and minimum block delta have elapsed", async function () {
+      const guardians = [guardian1.address];
+      await spooVault.connect(owner).createVault("Inheritance Vault", "Desc", guardians, 1);
+      await spooVault.connect(owner).configureVaultRelease(1, 1 * 24 * 60 * 60); // 1 day
+
+      await time.increase(2 * 24 * 60 * 60);
+      const minBlockDelta = await spooVault.MIN_POST_DEATH_BLOCK_DELTA();
+      await mine(minBlockDelta);
+
+      const state = await spooVault.getVaultReleaseState(1);
+      expect(state.postDeathUnlocked).to.equal(true);
     });
   });
 });

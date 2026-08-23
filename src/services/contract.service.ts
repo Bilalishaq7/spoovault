@@ -1,5 +1,21 @@
 import { ethers } from "ethers";
 import { stellarService } from "./stellar.service";
+import { identityService } from "./identity.service";
+import { TtlCache } from "../utils/ttlCache";
+import {
+  OfflineQueuedError,
+  isNetworkFailure,
+  withOfflineFallback,
+  readDocumentsCache,
+  readInvitesCache,
+  readPublicKeyCache,
+  readVaultsCache,
+  writeDocumentsCache,
+  writeInvitesCache,
+  writePublicKeyCache,
+  writeVaultsCache,
+} from "./offline/offlineCache.service";
+import { enqueueAction } from "./offline/offlineQueue.service";
 
 export interface VaultData {
   id: number;
@@ -10,6 +26,7 @@ export interface VaultData {
   approvalThreshold: number;
   isActive: boolean;
   createdAt: number;
+  network?: "avalanche" | "stellar";
 }
 
 export interface DocumentData {
@@ -35,6 +52,8 @@ export interface ActivityEvent {
   actor: string;
   timestamp: number;
   status: "success" | "pending";
+  txHash?: string;
+  network?: "avalanche" | "stellar";
 }
 
 export interface AccessRequestData {
@@ -70,6 +89,11 @@ export interface VaultReleaseState {
   postDeathUnlocked: boolean;
 }
 
+export interface KeeperAuthorizationData {
+  keeper: string;
+  expiresAt: number;
+}
+
 const CONTRACT_ABI = [
   "function createVault(string name, string description, address[] guardians, uint256 approvalThreshold) external returns (uint256)",
   "function addDocument(uint256 vaultId, string encryptedMetadata, string ipfsHash, uint8 requiredAccess) external returns (uint256)",
@@ -78,7 +102,15 @@ const CONTRACT_ABI = [
   "function addDocumentWithReleaseCondition(uint256 vaultId, string encryptedMetadata, string ipfsHash, uint8 requiredAccess, uint8 releaseCondition, address[] guardiansList, string[] shares) external returns (uint256)",
   "function configureVaultRelease(uint256 vaultId, uint256 inactivityPeriod) external",
   "function proveLife(uint256 vaultId) external",
+  "function authorizeKeeperBySig(uint256 vaultId, address keeper, uint256 expiresAt, bytes signature) external",
+  "function revokeKeeper(uint256 vaultId) external",
+  "function proveLifeByKeeper(uint256 vaultId) external",
+  "function keeperAuthorizations(uint256 vaultId) external view returns (address keeper, uint256 expiresAt)",
+  "function keeperAuthNonces(uint256 vaultId) external view returns (uint256)",
+  "function getVaultGID(uint256 vaultId) external view returns (string)",
   "function setEmergencyMode(uint256 vaultId, bool enabled) external",
+  "function setBeneficiary(uint256 vaultId, address beneficiary) external",
+  "function getBeneficiary(uint256 vaultId) external view returns (address)",
   "function getVaultReleaseState(uint256 vaultId) external view returns (bool emergencyMode, uint256 inactivityPeriod, uint256 lastProofOfLife, bool postDeathUnlocked)",
   "function documentReleaseCondition(uint256 documentId) external view returns (uint8)",
   "function requestAccess(uint256 documentId) external returns (uint256)",
@@ -116,7 +148,20 @@ const CONTRACT_ABI = [
   "event PublicKeyRegistered(address indexed user, string publicKey)",
   "event GuardianSharesSaved(uint256 indexed documentId)",
   "event ShareSubmittedForBeneficiary(uint256 indexed requestId, address indexed guardian, string encryptedShare)",
+  "event BeneficiarySet(uint256 indexed vaultId, address indexed beneficiary)",
+  "event KeeperAuthorized(uint256 indexed vaultId, address indexed owner, address indexed keeper, uint256 expiresAt)",
+  "event KeeperRevoked(uint256 indexed vaultId, address indexed owner)",
+  "event ProofOfLifeRelayed(uint256 indexed vaultId, address indexed owner, address indexed keeper, uint256 timestamp)",
 ];
+
+const KEEPER_AUTHORIZATION_EIP712_TYPES = {
+  KeeperAuthorization: [
+    { name: "vaultId", type: "uint256" },
+    { name: "keeper", type: "address" },
+    { name: "expiresAt", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+  ],
+};
 
 let provider: ethers.Provider | null = null;
 let fallbackProviders: ethers.JsonRpcProvider[] = [];
@@ -124,6 +169,17 @@ let readContract: ethers.Contract | null = null;
 let writeContract: ethers.Contract | null = null;
 let verifiedAddress: string | null = null;
 let hasVerifiedCode = false;
+
+// Read-only view calls (hasActiveAccess, getVault) are idempotent within a short
+// window, so cache them for a bounded TTL instead of re-hitting the RPC endpoint
+// on every render/navigation. See invalidation calls in the write paths below.
+const VIEW_CALL_TTL_MS = 10_000;
+const hasActiveAccessCache = new TtlCache<boolean>(VIEW_CALL_TTL_MS);
+const getVaultCache = new TtlCache<any>(VIEW_CALL_TTL_MS);
+
+const clearAccessCache = (): void => hasActiveAccessCache.clear();
+const invalidateVaultCache = (vaultId: number): void =>
+  getVaultCache.invalidate(`getVault:${vaultId}`);
 
 const FUJI_RPC_URLS = [
   "https://api.avax-test.network/ext/bc/C/rpc",
@@ -643,6 +699,8 @@ const clear = (): void => {
   writeContract = null;
   verifiedAddress = null;
   hasVerifiedCode = false;
+  hasActiveAccessCache.clear();
+  getVaultCache.clear();
 };
 
 const isReady = (): boolean => !!readContract;
@@ -840,6 +898,8 @@ const acceptGuardianInvite = async (vaultId: number): Promise<void> => {
   const contract = ensureWriteContract();
   const tx = await contract.acceptGuardianInvite(vaultId);
   await waitForReceipt(tx);
+  // Guardian is pushed onto vault.guardians on-chain, which getVault() returns.
+  invalidateVaultCache(vaultId);
 };
 
 const mintAccessToken = async (
@@ -860,6 +920,10 @@ const mintAccessToken = async (
     try {
       const parsed = iface.parseLog(log);
       if (parsed && parsed.name === "NFTMinted") {
+        // Minting a vault pass does not retroactively grant hasActiveAccess for
+        // any document: access is only ever set by _grantAccess() inside
+        // approveAccess, and a request already rejected for lacking a token
+        // stays rejected. No cache invalidation needed here.
         return Number(parsed.args.tokenId);
       }
     } catch {
@@ -874,7 +938,15 @@ const burnAccessToken = async (tokenId: number): Promise<void> => {
   const contract = ensureWriteContract();
   const tx = await contract.burnAccessToken(tokenId);
   await waitForReceipt(tx);
+  // Burning bumps the vault's access version on-chain, revoking every prior
+  // grant for that owner+vault in O(1). We can't cheaply resolve which cached
+  // (documentId, user) keys that affects from here, so clear the whole
+  // hasActiveAccess cache rather than risk serving a stale "still has access".
+  clearAccessCache();
 };
+
+const cachedGetVault = (contract: ethers.Contract, vaultId: number): Promise<any> =>
+  getVaultCache.getOrFetch(`getVault:${vaultId}`, () => contract.getVault(vaultId));
 
 const mapVaultData = (vault: any): VaultData => ({
   id: Number(vault[0]),
@@ -885,6 +957,7 @@ const mapVaultData = (vault: any): VaultData => ({
   approvalThreshold: Number(vault[5]),
   isActive: vault[6],
   createdAt: Number(vault[7]),
+  network: "avalanche",
 });
 
 const mapDocumentData = (doc: any): DocumentData => ({
@@ -908,7 +981,7 @@ const fetchVaultsByIds = async (vaultIds: number[]): Promise<VaultData[]> => {
   const vaults = await Promise.all(
     uniqueIds.map(async (id) => {
       try {
-        const vault = await contract.getVault(id);
+        const vault = await cachedGetVault(contract, id);
         return mapVaultData(vault);
       } catch {
         return null;
@@ -927,7 +1000,7 @@ const fetchVaults = async (): Promise<VaultData[]> => {
     new Set(logs.map((entry) => Number(entry.parsed.args.vaultId)))
   );
 
-  const vaults = await Promise.all(ids.map((id) => contract.getVault(id)));
+  const vaults = await Promise.all(ids.map((id) => cachedGetVault(contract, id)));
   return vaults.map((vault) => mapVaultData(vault));
 };
 
@@ -1057,7 +1130,10 @@ const hasActiveAccess = async (
   await ensureContractDeployed();
   const contract = ensureReadContract();
   try {
-    const allowed = await contract.hasActiveAccess(documentId, user);
+    const allowed = await hasActiveAccessCache.getOrFetch(
+      `hasActiveAccess:avalanche:${documentId}:${user.toLowerCase()}`,
+      () => contract.hasActiveAccess(documentId, user)
+    );
     return Boolean(allowed);
   } catch {
     return false;
@@ -1078,7 +1154,10 @@ const getActiveAccessMap = async (
   const entries = await Promise.all(
     documentIds.map(async (documentId) => {
       try {
-        const allowed = await contract.hasActiveAccess(documentId, user);
+        const allowed = await hasActiveAccessCache.getOrFetch(
+          `hasActiveAccess:avalanche:${documentId}:${user.toLowerCase()}`,
+          () => contract.hasActiveAccess(documentId, user)
+        );
         return [documentId, Boolean(allowed)] as const;
       } catch {
         return [documentId, false] as const;
@@ -1223,13 +1302,25 @@ const configureVaultRelease = async (
   await waitForReceipt(tx);
 };
 
-const recordProofOfLife = async (vaultId: number): Promise<void> => {
+const recordProofOfLife = async (vaultId: number): Promise<string> => {
   const contract = ensureWriteContract();
   if (!contractHasFunction(contract, "proveLife(uint256)")) {
     throw new Error("Current contract does not support proof-of-life actions.");
   }
   const tx = await contract.proveLife(vaultId);
-  await waitForReceipt(tx);
+  const receipt = await waitForReceipt(tx);
+  if (!receipt?.hash) throw new Error("Proof-of-life transaction was not confirmed");
+  return receipt.hash;
+};
+
+const getVaultGID = async (vaultId: number): Promise<string> => {
+  if (getEcosystem() === "stellar") {
+    return `stellar-testnet:${vaultId}`;
+  }
+  if (!readContract || !contractHasFunction(readContract, "getVaultGID(uint256)")) {
+    throw new Error("Cross-chain vault identity is not supported by this contract");
+  }
+  return String(await readContract.getVaultGID(vaultId));
 };
 
 const setEmergencyMode = async (vaultId: number, enabled: boolean): Promise<void> => {
@@ -1239,6 +1330,122 @@ const setEmergencyMode = async (vaultId: number, enabled: boolean): Promise<void
   }
   const tx = await contract.setEmergencyMode(vaultId, enabled);
   await waitForReceipt(tx);
+};
+
+const setBeneficiary = async (vaultId: number, beneficiary: string): Promise<void> => {
+  const contract = ensureWriteContract();
+  if (!contractHasFunction(contract, "setBeneficiary(uint256,address)")) {
+    throw new Error("Current contract does not support beneficiary notifications.");
+  }
+  const tx = await contract.setBeneficiary(vaultId, beneficiary);
+  await waitForReceipt(tx);
+};
+
+const getBeneficiary = async (vaultId: number): Promise<string> => {
+  await ensureContractDeployed();
+  const contract = ensureReadContract();
+
+  if (!contractHasFunction(contract, "getBeneficiary(uint256)")) {
+    return ethers.ZeroAddress;
+  }
+
+  try {
+    return await contract.getBeneficiary(vaultId);
+  } catch {
+    return ethers.ZeroAddress;
+  }
+};
+
+/**
+ * Vault creator signs an EIP-712 "KeeperAuthorization" message off-chain, delegating
+ * proof-of-life heartbeats for `vaultId` to `keeper` until `expiresAt`. Signing costs no
+ * gas; the returned signature is later relayed on-chain (by anyone, typically the keeper
+ * itself) via {relayKeeperAuthorization}.
+ */
+const signKeeperAuthorization = async (
+  vaultId: number,
+  keeper: string,
+  expiresAt: number
+): Promise<string> => {
+  const contract = ensureWriteContract();
+  const signer = contract.runner;
+  if (!signer || typeof (signer as ethers.Signer).signTypedData !== "function") {
+    throw new Error("A connected wallet signer is required to authorize a keeper.");
+  }
+
+  const nonce = await contract.keeperAuthNonces(vaultId);
+  const domain = {
+    name: "SpooVault",
+    version: "1",
+    chainId: getConfiguredChainId(),
+    verifyingContract: getContractAddress(),
+  };
+
+  return (signer as ethers.Signer).signTypedData(domain, KEEPER_AUTHORIZATION_EIP712_TYPES, {
+    vaultId,
+    keeper,
+    expiresAt,
+    nonce,
+  });
+};
+
+/**
+ * Submits a vault creator's signed keeper authorization on-chain. Callable by anyone —
+ * the EIP-712 signature alone proves the creator's consent — so this is typically invoked
+ * by the keeper itself when it first registers to relay a vault's heartbeats.
+ */
+const relayKeeperAuthorization = async (
+  vaultId: number,
+  keeper: string,
+  expiresAt: number,
+  signature: string
+): Promise<void> => {
+  const contract = ensureWriteContract();
+  if (!contractHasFunction(contract, "authorizeKeeperBySig(uint256,address,uint256,bytes)")) {
+    throw new Error("Current contract does not support keeper delegation.");
+  }
+  const tx = await contract.authorizeKeeperBySig(vaultId, keeper, expiresAt, signature);
+  await waitForReceipt(tx);
+};
+
+const revokeKeeper = async (vaultId: number): Promise<void> => {
+  const contract = ensureWriteContract();
+  if (!contractHasFunction(contract, "revokeKeeper(uint256)")) {
+    throw new Error("Current contract does not support keeper delegation.");
+  }
+  const tx = await contract.revokeKeeper(vaultId);
+  await waitForReceipt(tx);
+};
+
+/**
+ * Web3 Keeper (Chainlink Automation / Gelato) relay of a proof-of-life heartbeat,
+ * submitted using the keeper's own signer rather than the vault creator's.
+ */
+const relayProofOfLife = async (vaultId: number): Promise<void> => {
+  const contract = ensureWriteContract();
+  if (!contractHasFunction(contract, "proveLifeByKeeper(uint256)")) {
+    throw new Error("Current contract does not support keeper-relayed heartbeats.");
+  }
+  const tx = await contract.proveLifeByKeeper(vaultId);
+  await waitForReceipt(tx);
+};
+
+const getKeeperAuthorization = async (vaultId: number): Promise<KeeperAuthorizationData | null> => {
+  await ensureContractDeployed();
+  const contract = ensureReadContract();
+  if (!contractHasFunction(contract, "keeperAuthorizations(uint256)")) {
+    return null;
+  }
+  try {
+    const value = await contract.keeperAuthorizations(vaultId);
+    const keeper = String(value.keeper ?? value[0]);
+    if (keeper === ethers.ZeroAddress) {
+      return null;
+    }
+    return { keeper, expiresAt: Number(value.expiresAt ?? value[1]) };
+  } catch {
+    return null;
+  }
 };
 
 const fetchPendingInvites = async (user: string): Promise<GuardianInviteData[]> => {
@@ -1317,7 +1524,7 @@ const fetchPendingApprovalsForGuardian = async (
       const vaultId = Number(document[1]);
       let vault = vaultCache.get(vaultId);
       if (!vault) {
-        vault = await contract.getVault(vaultId);
+        vault = await cachedGetVault(contract, vaultId);
         vaultCache.set(vaultId, vault);
       }
 
@@ -1408,6 +1615,23 @@ const fetchUserTokens = async (account: string): Promise<TokenData[]> => {
     .sort((a, b) => b.tokenId - a.tokenId);
 };
 
+const hasVaultToken = async (account: string, vaultId: number): Promise<boolean> => {
+  if (!account || !vaultId || vaultId <= 0) return false;
+  try {
+    await ensureContractDeployed();
+    const contract = ensureReadContract();
+    const result = await contract.hasVaultToken(account, vaultId);
+    return Boolean(result);
+  } catch {
+    try {
+      const userTokens = await fetchUserTokens(account);
+      return userTokens.some((t) => t.vaultId === vaultId);
+    } catch {
+      return false;
+    }
+  }
+};
+
 const getActivePassCountByVault = async (
   vaultIds: number[]
 ): Promise<Record<number, number>> => {
@@ -1461,6 +1685,7 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
   await ensureContractDeployed();
   const contract = ensureReadContract();
   const perEventTail = Math.max(limit * 6, 40);
+  const network = getEcosystem();
   const [vaultLogs, documentLogs, requestLogs, nftLogs] = await Promise.all([
     getEventLogs("VaultCreated", { tail: perEventTail }),
     getEventLogs("DocumentAdded", { tail: perEventTail }),
@@ -1489,6 +1714,7 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
     limited.map(async (entry) => {
       const timestamp = await getBlockTimestamp(entry.log.blockNumber, blockCache);
       const name = entry.parsed.name;
+      const txHash = entry.log.transactionHash;
 
       if (name === "VaultCreated") {
         return {
@@ -1496,6 +1722,8 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
           actor: entry.parsed.args.creator,
           timestamp,
           status: "success" as const,
+          txHash,
+          network,
         };
       }
 
@@ -1507,6 +1735,8 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
             actor: doc[4],
             timestamp,
             status: "success" as const,
+            txHash,
+            network,
           };
         } catch {
           return {
@@ -1514,6 +1744,8 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
             actor: "Unknown",
             timestamp,
             status: "success" as const,
+            txHash,
+            network,
           };
         }
       }
@@ -1524,6 +1756,8 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
           actor: entry.parsed.args.requester,
           timestamp,
           status: "pending" as const,
+          txHash,
+          network,
         };
       }
 
@@ -1533,6 +1767,8 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
           actor: entry.parsed.args.to,
           timestamp,
           status: "success" as const,
+          txHash,
+          network,
         };
       }
 
@@ -1541,6 +1777,8 @@ const getRecentActivity = async (limit = 5): Promise<ActivityEvent[]> => {
         actor: "Unknown",
         timestamp,
         status: "success" as const,
+        txHash,
+        network,
       };
     })
   );
@@ -1553,16 +1791,41 @@ const getEcosystem = (): "avalanche" | "stellar" => {
   return (window.localStorage.getItem("spoovault-ecosystem") as "avalanche" | "stellar") || "avalanche";
 };
 
+// ---------------------------------------------------------------------------
+// Offline-first integration
+//
+// Reads fall back to the Dexie/IndexedDB cache when the network is down so
+// vault inspection keeps working; writes that fail due to connectivity are
+// persisted into the offline action queue and replayed automatically on
+// reconnect (see services/offline/replay.service.ts).
+// ---------------------------------------------------------------------------
+
 const proxiedCreateVault = async (
   name: string,
   description: string,
   guardians: string[],
   approvalThreshold: number
 ): Promise<number> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.createVault(name, description, guardians, approvalThreshold);
+  const run = async (): Promise<number> => {
+    if (getEcosystem() === "stellar") {
+      return stellarService.createVault(name, description, guardians, approvalThreshold);
+    }
+    return createVault(name, description, guardians, approvalThreshold);
+  };
+
+  try {
+    return await run();
+  } catch (error) {
+    if (isNetworkFailure(error)) {
+      await enqueueAction(
+        "create-vault",
+        { name, description, guardians, approvalThreshold },
+        { label: `Vault "${name}"` }
+      );
+      throw new OfflineQueuedError(`vault "${name}" creation`);
+    }
+    throw error;
   }
-  return createVault(name, description, guardians, approvalThreshold);
 };
 
 const proxiedAddDocument = async (
@@ -1574,37 +1837,85 @@ const proxiedAddDocument = async (
   guardiansList?: string[],
   shares?: string[]
 ): Promise<number> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.addDocument(
-      vaultId,
-      encryptedMetadata,
-      ipfsHash,
-      requiredAccess,
-      releaseCondition,
-      guardiansList,
-      shares
-    );
+  const run = async (): Promise<number> => {
+    if (getEcosystem() === "stellar") {
+      return stellarService.addDocument(
+        vaultId,
+        encryptedMetadata,
+        ipfsHash,
+        requiredAccess,
+        releaseCondition,
+        guardiansList,
+        shares
+      );
+    }
+    return addDocument(vaultId, encryptedMetadata, ipfsHash, requiredAccess, releaseCondition, guardiansList, shares);
+  };
+
+  try {
+    return await run();
+  } catch (error) {
+    if (isNetworkFailure(error)) {
+      await enqueueAction(
+        "add-document",
+        {
+          vaultId,
+          encryptedMetadata,
+          ipfsHash,
+          requiredAccess,
+          releaseCondition,
+          guardiansList,
+          shares,
+        },
+        { label: `document upload to vault #${vaultId}` }
+      );
+      throw new OfflineQueuedError("document upload");
+    }
+    throw error;
   }
-  return addDocument(vaultId, encryptedMetadata, ipfsHash, requiredAccess, releaseCondition, guardiansList, shares);
 };
 
 const proxiedRequestAccess = async (documentId: number): Promise<number> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.requestAccess(documentId);
+  const run = async (): Promise<number> => {
+    if (getEcosystem() === "stellar") {
+      return stellarService.requestAccess(documentId);
+    }
+    return requestAccess(documentId);
+  };
+
+  try {
+    return await run();
+  } catch (error) {
+    if (isNetworkFailure(error)) {
+      await enqueueAction(
+        "request-access",
+        { documentId },
+        { label: `access request for document #${documentId}` }
+      );
+      throw new OfflineQueuedError("access request");
+    }
+    throw error;
   }
-  return requestAccess(documentId);
 };
 
 const proxiedApproveAccess = async (requestId: number, encryptedShareForBeneficiary?: string): Promise<void> => {
   if (getEcosystem() === "stellar") {
-    return stellarService.approveAccess(requestId, encryptedShareForBeneficiary);
+    await stellarService.approveAccess(requestId, encryptedShareForBeneficiary);
+  } else {
+    await approveAccess(requestId, encryptedShareForBeneficiary);
   }
-  return approveAccess(requestId, encryptedShareForBeneficiary);
+  // Approval can flip hasActiveAccess for the requester on both ecosystems.
+  clearAccessCache();
 };
 
 const proxiedAcceptGuardianInvite = async (vaultId: number): Promise<void> => {
   if (getEcosystem() === "stellar") {
-    return stellarService.acceptGuardianInvite(vaultId);
+    await stellarService.acceptGuardianInvite(vaultId);
+    // Stellar's hasActiveAccess check grants access directly to a document's
+    // vault guardians (see proxiedHasActiveAccess below), unlike the EVM
+    // contract where guardianship alone never grants document access.
+    clearAccessCache();
+    return;
   }
   return acceptGuardianInvite(vaultId);
 };
@@ -1612,18 +1923,43 @@ const proxiedAcceptGuardianInvite = async (vaultId: number): Promise<void> => {
 const proxiedFetchVaultsForAccount = async (
   account: string,
   options?: { tokenVaultIds?: number[] }
-): Promise<VaultData[]> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.fetchVaultsForAccount(account) as unknown as Promise<VaultData[]>;
-  }
-  return fetchVaultsForAccount(account, options);
-};
+): Promise<VaultData[]> =>
+  withOfflineFallback({
+    scope: `vaults:${account}`,
+    fetchLive: async () => {
+      if (getEcosystem() === "stellar") {
+        return stellarService.fetchVaultsForAccount(account) as unknown as VaultData[];
+      }
+      return fetchVaultsForAccount(account, options);
+    },
+    readCache: () => readVaultsCache(account, getEcosystem()),
+    writeCache: (vaults) => writeVaultsCache(account, getEcosystem(), vaults),
+  });
 
-const proxiedFetchDocumentsForVaults = async (vaultIds: number[]): Promise<DocumentData[]> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.fetchDocumentsForVaults(vaultIds) as unknown as Promise<DocumentData[]>;
-  }
-  return fetchDocumentsForVaults(vaultIds);
+const proxiedFetchDocumentsForVaults = async (
+  vaultIds: number[],
+  account?: string
+): Promise<DocumentData[]> => {
+  const network = getEcosystem();
+  const owner = account ?? "";
+
+  return withOfflineFallback({
+    scope: "documents",
+    fetchLive: async () => {
+      if (network === "stellar") {
+        return stellarService.fetchDocumentsForVaults(vaultIds) as unknown as DocumentData[];
+      }
+      return fetchDocumentsForVaults(vaultIds);
+    },
+    readCache: () =>
+      owner
+        ? readDocumentsCache(owner, network)
+        : Promise.resolve([] as DocumentData[]),
+    writeCache: (documents) =>
+      owner
+        ? writeDocumentsCache(owner, network, documents)
+        : Promise.resolve(),
+  });
 };
 
 const proxiedFetchPendingApprovalsForGuardian = async (
@@ -1651,49 +1987,82 @@ const proxiedGetBeneficiaryKeyShare = async (requestId: number, guardian: string
 };
 
 const proxiedRegisterPublicKey = async (publicKey: string): Promise<void> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.registerPublicKey(publicKey);
+  const run = async (): Promise<void> => {
+    if (getEcosystem() === "stellar") {
+      return stellarService.registerPublicKey(publicKey);
+    }
+    return registerPublicKey(publicKey);
+  };
+
+  try {
+    await run();
+  } catch (error) {
+    if (isNetworkFailure(error)) {
+      await enqueueAction(
+        "register-public-key",
+        { publicKey },
+        { label: "encryption public key registration" }
+      );
+      throw new OfflineQueuedError("encryption public key registration");
+    }
+    throw error;
   }
-  return registerPublicKey(publicKey);
 };
 
-const proxiedGetUserPublicKey = async (user: string): Promise<string> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.getUserPublicKey(user);
-  }
-  return getUserPublicKey(user);
-};
+const proxiedGetUserPublicKey = async (user: string): Promise<string> =>
+  withOfflineFallback({
+    scope: `publicKey:${user}`,
+    fetchLive: async () => {
+      if (getEcosystem() === "stellar") {
+        return stellarService.getUserPublicKey(user);
+      }
+      return getUserPublicKey(user);
+    },
+    readCache: () => readPublicKeyCache(user, getEcosystem()),
+    writeCache: (publicKey) => writePublicKeyCache(user, publicKey, getEcosystem()),
+  });
 
-const proxiedFetchPendingInvites = async (account: string): Promise<any[]> => {
-  if (getEcosystem() === "stellar") {
-    return stellarService.getPendingInvites(account);
-  }
-  return fetchPendingInvites(account);
-};
+const proxiedFetchPendingInvites = async (account: string): Promise<any[]> =>
+  withOfflineFallback({
+    scope: `invites:${account}`,
+    fetchLive: async () => {
+      if (getEcosystem() === "stellar") {
+        return stellarService.getPendingInvites(account);
+      }
+      return fetchPendingInvites(account);
+    },
+    readCache: () => readInvitesCache(account, getEcosystem()),
+    writeCache: (invites) => writeInvitesCache(account, getEcosystem(), invites),
+  });
 
 const proxiedHasActiveAccess = async (documentId: number, user: string): Promise<boolean> => {
   if (getEcosystem() === "stellar") {
     const account = stellarService.getAccount();
     if (!account) return false;
-    const vaults = await stellarService.fetchVaultsForAccount(account);
-    const docs = await stellarService.fetchDocumentsForVaults(vaults.map(v => v.id));
-    const doc = docs.find(d => d.id === documentId);
-    if (!doc) return false;
-    if (doc.uploadedBy.toLowerCase() === account.toLowerCase()) return true;
-    
-    const vault = vaults.find(v => v.id === doc.vaultId);
-    if (vault?.guardians.some(g => g.toLowerCase() === account.toLowerCase())) return true;
-    
-    try {
-      const requestsRaw = localStorage.getItem("spoovault-stellar-mock-requests");
-      if (requestsRaw) {
-        const requests = JSON.parse(requestsRaw) as any[];
-        return requests.some(
-          r => r.documentId === documentId && r.requester.toLowerCase() === account.toLowerCase() && r.status === 1
-        );
+    return hasActiveAccessCache.getOrFetch(
+      `hasActiveAccess:stellar:${documentId}:${account.toLowerCase()}`,
+      async () => {
+        const vaults = await stellarService.fetchVaultsForAccount(account);
+        const docs = await stellarService.fetchDocumentsForVaults(vaults.map(v => v.id));
+        const doc = docs.find(d => d.id === documentId);
+        if (!doc) return false;
+        if (doc.uploadedBy.toLowerCase() === account.toLowerCase()) return true;
+
+        const vault = vaults.find(v => v.id === doc.vaultId);
+        if (vault?.guardians.some(g => g.toLowerCase() === account.toLowerCase())) return true;
+
+        try {
+          const requestsRaw = localStorage.getItem("spoovault-stellar-mock-requests");
+          if (requestsRaw) {
+            const requests = JSON.parse(requestsRaw) as any[];
+            return requests.some(
+              r => r.documentId === documentId && r.requester.toLowerCase() === account.toLowerCase() && r.status === 1
+            );
+          }
+        } catch {}
+        return false;
       }
-    } catch {}
-    return false;
+    );
   }
   return hasActiveAccess(documentId, user);
 };
@@ -1739,6 +2108,42 @@ const proxiedGetLatestRequestsForUser = async (
   return getLatestRequestsForUser(user, documentIds);
 };
 
+const proxiedFetchUserTokens = async (account: string): Promise<TokenData[]> => {
+  if (getEcosystem() === "stellar") {
+    return stellarService.fetchUserTokens(account) as unknown as Promise<TokenData[]>;
+  }
+  return fetchUserTokens(account);
+};
+
+const proxiedHasVaultToken = async (
+  account: string,
+  vaultId: number,
+  network?: "avalanche" | "stellar"
+): Promise<boolean> => {
+  const targetNetwork = network || getEcosystem();
+  try {
+    if (targetNetwork === "stellar") {
+      return await stellarService.hasVaultToken(account, vaultId);
+    } else if (targetNetwork === "avalanche") {
+      return await hasVaultToken(account, vaultId);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+const proxiedMintAccessToken = async (
+  vaultId: number,
+  to: string,
+  tokenURI: string
+): Promise<number> => {
+  if (getEcosystem() === "stellar") {
+    return stellarService.mintAccessToken(vaultId, to, tokenURI);
+  }
+  return mintAccessToken(vaultId, to, tokenURI);
+};
+
 export const contractService = {
   initialize,
   clear,
@@ -1748,7 +2153,7 @@ export const contractService = {
   requestAccess: proxiedRequestAccess,
   approveAccess: proxiedApproveAccess,
   acceptGuardianInvite: proxiedAcceptGuardianInvite,
-  mintAccessToken,
+  mintAccessToken: proxiedMintAccessToken,
   burnAccessToken,
   fetchVaults,
   fetchVaultsByIds,
@@ -1756,7 +2161,8 @@ export const contractService = {
   fetchDocuments,
   fetchDocumentsForVaults: proxiedFetchDocumentsForVaults,
   fetchPendingInvites: proxiedFetchPendingInvites,
-  fetchUserTokens,
+  fetchUserTokens: proxiedFetchUserTokens,
+  hasVaultToken: proxiedHasVaultToken,
   getActivePassCountByVault,
   getTotalSupply,
   hasActiveAccess: proxiedHasActiveAccess,
@@ -1768,11 +2174,21 @@ export const contractService = {
   fetchVaultReleaseStates,
   configureVaultRelease,
   recordProofOfLife,
+  getVaultGID,
   setEmergencyMode,
+  setBeneficiary,
+  getBeneficiary,
+  signKeeperAuthorization,
+  relayKeeperAuthorization,
+  revokeKeeper,
+  relayProofOfLife,
+  getKeeperAuthorization,
   fetchPendingApprovalsForGuardian: proxiedFetchPendingApprovalsForGuardian,
   getRecentActivity,
   registerPublicKey: proxiedRegisterPublicKey,
   getUserPublicKey: proxiedGetUserPublicKey,
   getEncryptedGuardianShare: proxiedGetEncryptedGuardianShare,
   getBeneficiaryKeyShare: proxiedGetBeneficiaryKeyShare,
+  registerCrossChainIdentity: identityService.registerIdentity,
+  resolveCrossChainAddress: identityService.resolveAddressForNetwork,
 };
