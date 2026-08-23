@@ -29,9 +29,7 @@ export const E2E_CHAIN_NAME = "Avalanche Fuji Testnet";
 
 /** Resolve a private key for a given Anvil account index (0-based). */
 export function privateKeyForIndex(index: number): string {
-  const hd = HDNodeWallet.fromPhrase(TEST_MNEMONIC);
-  const child = hd.derivePath(`m/44'/60'/0'/0/${index}`);
-  return child.privateKey;
+  return accountAt(index).privateKey;
 }
 
 function accountAt(index: number): HDNodeWallet {

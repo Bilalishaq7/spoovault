@@ -39,10 +39,10 @@ import {
   generateEncryptionKey,
   isIPFSConfigured,
   shortenAddress,
-  uploadToIPFS,
   formatFileSize,
   isValidAddress,
 } from "../utils/helpers";
+import VirtualizedDocumentsList from "../components/documents/VirtualizedDocumentsList";
 import { toast } from "react-hot-toast";
 import { buttonClasses } from "../utils/buttonClasses";
 import { captureError } from "../services/telemetry.service";
@@ -50,7 +50,15 @@ import { keyInboxService } from "../services/keyInbox.service";
 import { keyStoreService } from "../services/keyStore.service";
 import { splitSecretVSS, parseEncryptedMetadataPayload } from "../services/secrets.service";
 import { encryptWithPublicKey } from "../utils/crypto";
-import { VirtualizedDocumentsList } from "../components/documents/VirtualizedDocumentsList";
+import { enqueueAction } from "../services/offline/offlineQueue.service";
+import { clientKeyringService } from "../services/clientKeyring.service";
+import {
+  collectStream,
+  decryptStream,
+  detectStreamingCiphertext,
+  encryptAndUploadFile,
+  importStreamingKey,
+} from "../services/streamingCrypto.service";
 
 type WordArray = { words: number[]; sigBytes: number };
 type ImportedKeyPayload = {
@@ -79,12 +87,32 @@ const wordArrayToUint8Array = (wordArray: WordArray): Uint8Array => {
   return u8;
 };
 
-const encryptFile = async (file: File, key: string): Promise<File> => {
-  const arrayBuffer = await file.arrayBuffer();
-  const wordArray = CryptoJS.lib.WordArray.create(arrayBuffer as any);
-  const encrypted = CryptoJS.AES.encrypt(wordArray, key).toString();
-  return new File([encrypted], `${file.name}.enc`, { type: "text/plain" });
+type SaveFilePickerWindow = Window & {
+  showSaveFilePicker?: (options?: {
+    suggestedName?: string;
+  }) => Promise<{ createWritable: () => Promise<WritableStream<Uint8Array> & { close: () => Promise<void> }> }>;
 };
+
+const decryptLegacyCiphertext = async (
+  encryptedText: string,
+  key: string
+): Promise<Uint8Array> => {
+  const decryptedWordArray = CryptoJS.AES.decrypt(encryptedText, key);
+  return wordArrayToUint8Array(decryptedWordArray);
+};
+
+const fileToBase64 = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const commaIndex = result.indexOf(",");
+      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+    };
+    reader.onerror = () =>
+      reject(new Error("Failed to read file for offline draft"));
+    reader.readAsDataURL(file);
+  });
 
 const Documents = () => {
   const { isOpen, onOpen, onClose } = useDisclosure();
@@ -169,7 +197,8 @@ const Documents = () => {
     try {
       const vaultsData = await contractService.fetchVaultsForAccount(account);
       const docsData = await contractService.fetchDocumentsForVaults(
-        vaultsData.map((vault) => vault.id)
+        vaultsData.map((vault) => vault.id),
+        account
       );
 
       const accountLower = account.toLowerCase();
@@ -654,8 +683,6 @@ const Documents = () => {
         commitments,
       });
 
-      const encryptedFile = await encryptFile(selectedFile, key);
-      
       // Encrypt each share for each guardian using their public key
       const encryptedShares: string[] = [];
       for (let i = 0; i < vault.guardians.length; i++) {
@@ -666,12 +693,64 @@ const Documents = () => {
         encryptedShares.push(encrypted);
       }
 
+      // Offline draft capture: everything up to this point is client-side, so
+      // persist the fully-encrypted payload into the offline queue. On
+      // reconnect the replay service pins it to IPFS and submits the on-chain
+      // transaction automatically.
+      if (!navigator.onLine) {
+        if (!account) {
+          throw new Error("Connect your wallet to queue uploads while offline.");
+        }
+        const ownerPublicKey = await clientKeyringService.getStoredPublicKey(account);
+        if (!ownerPublicKey) {
+          throw new Error(
+            "Generate your encryption key in Profile to enable offline drafts."
+          );
+        }
+
+        setUploadStage("uploading_ipfs");
+        const encryptedDocKey = await encryptWithPublicKey(key, ownerPublicKey);
+        const encryptedFileBase64 = await fileToBase64(selectedFile);
+
+        await enqueueAction(
+          "create-document-draft",
+          {
+            account,
+            vaultId: selectedVaultId,
+            vaultName: vault.name,
+            fileName: selectedFile.name,
+            fileSize: selectedFile.size,
+            fileType: selectedFile.type,
+            lastModified: selectedFile.lastModified,
+            encryptedMetadata,
+            encryptedFileBase64,
+            encryptedDocKey,
+            requiredAccess: accessLevel,
+            releaseCondition,
+            guardiansList: vault.guardians,
+            shares: encryptedShares,
+          },
+          { label: `Draft "${selectedFile.name}"` }
+        );
+
+        toast.success(
+          `Offline draft saved — "${selectedFile.name}" will upload automatically when you reconnect.`
+        );
+        setSelectedFile(null);
+        setSelectedVaultId(null);
+        setAccessLevel(0);
+        setReleaseCondition(0);
+        onClose();
+        return;
+      }
+
       setUploadStage("uploading_ipfs");
-      const ipfsResult = await uploadToIPFS(
-        encryptedFile,
-        { name: selectedFile.name },
-        abortController.signal
-      );
+      // Stream AES-GCM chunked ciphertext directly to Pinata/IPFS (O(chunk) RAM).
+      const ipfsResult = await encryptAndUploadFile(selectedFile, key, {
+        filename: `${selectedFile.name}.svsc`,
+        metadata: { name: selectedFile.name },
+        signal: abortController.signal,
+      });
 
       setUploadStage("submitting_tx");
       const documentId = await contractService.addDocument(
@@ -738,27 +817,69 @@ const Documents = () => {
 
     const response = await fetchFromIPFS(doc.ipfsHash);
 
-    const encryptedText = await response.text();
-    const decryptedWordArray = CryptoJS.AES.decrypt(encryptedText, key);
-    const bytes = wordArrayToUint8Array(decryptedWordArray);
-
+    const { isStreaming, stream } = await detectStreamingCiphertext(response.body as any);
     const metadata = decryptMetadata(doc);
     const name = metadata?.name || `document-${doc.id}`;
     const type = metadata?.type || "application/octet-stream";
 
-    return { bytes, name, type };
+    if (isStreaming && stream) {
+      const cryptoKey = await importStreamingKey(key);
+      const decrypted = decryptStream(stream as any, cryptoKey);
+      return { mode: "streaming" as const, decrypted, name, type };
+    }
+
+    const encryptedBytes = await collectStream(stream);
+    const encryptedText = new TextDecoder().decode(encryptedBytes);
+    const bytes = await decryptLegacyCiphertext(encryptedText, key);
+    return { mode: "legacy" as const, bytes, name, type };
   };
 
   const handleDownload = async (doc: DocumentData) => {
     try {
-      const { bytes, name, type } = await decryptFileFromIPFS(doc);
-      const arrayBuffer = new ArrayBuffer(bytes.byteLength);
-      new Uint8Array(arrayBuffer).set(bytes);
-      const blob = new Blob([arrayBuffer], { type });
+      const result = await decryptFileFromIPFS(doc);
+
+      if (result.mode === "streaming") {
+        const pickerWindow = window as SaveFilePickerWindow;
+        if (typeof pickerWindow.showSaveFilePicker === "function") {
+          const handle = await pickerWindow.showSaveFilePicker({
+            suggestedName: result.name,
+          });
+          const writable = await handle.createWritable();
+          try {
+            await result.decrypted.pipeTo(writable);
+          } catch (error) {
+            try {
+              await writable.close();
+            } catch {
+              // ignore close errors after failed pipe
+            }
+            throw error;
+          }
+          toast.success("Document saved");
+          return;
+        }
+
+        // Browsers without File System Access API: collect decrypted bytes.
+        const bytes = await collectStream(result.decrypted);
+        const arrayBuffer = new ArrayBuffer(bytes.byteLength);
+        new Uint8Array(arrayBuffer).set(bytes);
+        const blob = new Blob([arrayBuffer], { type: result.type });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = result.name;
+        link.click();
+        URL.revokeObjectURL(url);
+        return;
+      }
+
+      const arrayBuffer = new ArrayBuffer(result.bytes.byteLength);
+      new Uint8Array(arrayBuffer).set(result.bytes);
+      const blob = new Blob([arrayBuffer], { type: result.type });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = name;
+      link.download = result.name;
       link.click();
       URL.revokeObjectURL(url);
     } catch (error: any) {
@@ -769,10 +890,14 @@ const Documents = () => {
 
   const handleView = async (doc: DocumentData) => {
     try {
-      const { bytes, type } = await decryptFileFromIPFS(doc);
+      const result = await decryptFileFromIPFS(doc);
+      const bytes =
+        result.mode === "streaming"
+          ? await collectStream(result.decrypted)
+          : result.bytes;
       const arrayBuffer = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(arrayBuffer).set(bytes);
-      const blob = new Blob([arrayBuffer], { type });
+      const blob = new Blob([arrayBuffer], { type: result.type });
       const url = URL.createObjectURL(blob);
       window.open(url, "_blank");
       setTimeout(() => URL.revokeObjectURL(url), 1000);
