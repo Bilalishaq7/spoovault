@@ -1,4 +1,5 @@
 import { splitSecretVSS } from "../services/secrets.service";
+import { decryptWithPrivateKey, encryptWithPublicKey } from "../utils/crypto";
 
 export type CryptoWorkerRequest =
   | {
@@ -17,6 +18,16 @@ export type CryptoWorkerRequest =
         n: number;
         k: number;
       };
+    }
+  | {
+      id: string;
+      type: "REENCRYPT_ENVELOPE";
+      payload: {
+        data: string;
+        key: string;
+        oldPrivateKey?: string;
+        newPublicKey?: string;
+      };
     };
 
 export type CryptoWorkerResponse =
@@ -30,6 +41,11 @@ export type CryptoWorkerResponse =
       type: "SPLIT_SECRET_SUCCESS";
       shares: string[];
       commitments: string[];
+    }
+  | {
+      id: string;
+      type: "REENCRYPT_SUCCESS";
+      result: string;
     }
   | {
       id: string;
@@ -107,6 +123,19 @@ self.onmessage = async (event: MessageEvent<CryptoWorkerRequest>) => {
         type: "SPLIT_SECRET_SUCCESS",
         shares,
         commitments,
+      };
+      self.postMessage(response);
+    } else if (type === "REENCRYPT_ENVELOPE") {
+      const { oldPrivateKey, newPublicKey } = payload;
+      if (!oldPrivateKey || !newPublicKey) {
+        throw new Error("REENCRYPT_ENVELOPE requires oldPrivateKey and newPublicKey");
+      }
+      const plaintext = await decryptWithPrivateKey(payload.data, oldPrivateKey);
+      const reencrypted = await encryptWithPublicKey(plaintext, newPublicKey);
+      const response: CryptoWorkerResponse = {
+        id,
+        type: "REENCRYPT_SUCCESS",
+        result: reencrypted,
       };
       self.postMessage(response);
     } else {
