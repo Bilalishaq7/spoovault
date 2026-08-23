@@ -389,7 +389,7 @@ describe("SorobanEventIndexer", () => {
       await vi.runOnlyPendingTimersAsync();
       
       // Second call should include cursor
-      expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect((fetch as any).mock.calls.length).toBeGreaterThanOrEqual(2);
       
       indexer.stop();
     });
