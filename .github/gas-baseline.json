@@ -1,9 +1,9 @@
 {
   "version": 2,
   "compilerFingerprint": "bf393b2ba114",
-  "updatedAt": "2026-08-23T20:33:48.093Z",
+  "updatedAt": "2026-08-23T20:36:02.608Z",
   "gas": {
-    "CrossChainIdentityRegistry.bindIdentity(address,string,bytes32,uint256,bytes,bytes)": 1537824,
+    "CrossChainIdentityRegistry.bindIdentity(address,string,bytes32,uint256,bytes,bytes)": 1539096,
     "ERC6551Registry.createAccount(address,uint256,address,uint256,uint256,bytes)": 131636,
     "MockVRFCoordinator.fulfill(uint256,uint256)": 80941,
     "SpooAccountImplementation.executeCall(address,uint256,bytes)": 97770,
