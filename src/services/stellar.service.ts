@@ -1616,6 +1616,7 @@ export const stellarService = {
   isConfigured,
   setMockStellarSdk,
   setMockFreighter,
+  invokeSorobanContract: executeSorobanCall,
 };
 
 declare global {
