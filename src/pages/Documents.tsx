@@ -52,7 +52,6 @@ import { splitSecretVSS, parseEncryptedMetadataPayload } from "../services/secre
 import { encryptWithPublicKey } from "../utils/crypto";
 import { enqueueAction } from "../services/offline/offlineQueue.service";
 import { clientKeyringService } from "../services/clientKeyring.service";
-import { VirtualizedDocumentsList } from "../components/documents/VirtualizedDocumentsList";
 import {
   collectStream,
   decryptStream,
@@ -711,7 +710,7 @@ const Documents = () => {
 
         setUploadStage("uploading_ipfs");
         const encryptedDocKey = await encryptWithPublicKey(key, ownerPublicKey);
-        const encryptedFileBase64 = await fileToBase64(encryptedFile);
+        const encryptedFileBase64 = await fileToBase64(selectedFile);
 
         await enqueueAction(
           "create-document-draft",
