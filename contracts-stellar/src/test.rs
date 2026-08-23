@@ -348,39 +348,11 @@ fn test_prove_life_and_emergency_mode() {
 }
 
 #[test]
-<<<<<<< HEAD
-fn test_revoke_key_rotates_and_blacklists_old_key() {
-=======
 fn test_authorize_keeper_and_relay_heartbeat() {
->>>>>>> main
     let env = Env::default();
     let contract_id = env.register_contract(None, SpooVaultStellar);
     let client = SpooVaultStellarClient::new(&env, &contract_id);
 
-<<<<<<< HEAD
-    let user = Address::generate(&env);
-    env.mock_all_auths();
-
-    let old_key = String::from_str(&env, "OLD_COMPROMISED_KEY");
-    let new_key = String::from_str(&env, "NEW_ROTATED_KEY");
-
-    client.register_public_key(&user, &old_key);
-    assert_eq!(client.get_public_key(&user), Some(old_key.clone()));
-    assert!(!client.is_key_revoked(&old_key));
-
-    client.revoke_key(&user, &old_key, &new_key);
-
-    // Active key rotated to the new value
-    assert_eq!(client.get_public_key(&user), Some(new_key.clone()));
-    // Old key is permanently blacklisted
-    assert!(client.is_key_revoked(&old_key));
-    assert!(!client.is_key_revoked(&new_key));
-}
-
-#[test]
-#[should_panic(expected = "Public key has been revoked as compromised")]
-fn test_revoked_key_cannot_be_re_registered() {
-=======
     let creator = Address::generate(&env);
     let g1 = Address::generate(&env);
     let keeper = Address::generate(&env);
@@ -414,29 +386,10 @@ fn test_revoked_key_cannot_be_re_registered() {
 
 #[test]
 fn test_contract_account_guardian_approves_via_custom_auth() {
->>>>>>> main
     let env = Env::default();
     let contract_id = env.register_contract(None, SpooVaultStellar);
     let client = SpooVaultStellarClient::new(&env, &contract_id);
 
-<<<<<<< HEAD
-    let user = Address::generate(&env);
-    env.mock_all_auths();
-
-    let old_key = String::from_str(&env, "OLD_COMPROMISED_KEY");
-    let new_key = String::from_str(&env, "NEW_ROTATED_KEY");
-
-    client.register_public_key(&user, &old_key);
-    client.revoke_key(&user, &old_key, &new_key);
-
-    // The compromised key can never be re-registered
-    client.register_public_key(&user, &old_key);
-}
-
-#[test]
-#[should_panic(expected = "Caller does not own the old public key")]
-fn test_revoke_key_requires_proof_of_possession() {
-=======
     let creator = Address::generate(&env);
     // A deployed contract acting as a guardian - a custom account abstraction
     // signer, not a raw Stellar keypair.
@@ -540,28 +493,10 @@ fn test_deep_auth_invocation_notifies_access_registry() {
 
 #[test]
 fn test_prove_life_by_keeper_fails_when_unauthorized() {
->>>>>>> main
     let env = Env::default();
     let contract_id = env.register_contract(None, SpooVaultStellar);
     let client = SpooVaultStellarClient::new(&env, &contract_id);
 
-<<<<<<< HEAD
-    let user = Address::generate(&env);
-    let attacker = Address::generate(&env);
-    env.mock_all_auths();
-
-    let old_key = String::from_str(&env, "USER_KEY");
-    client.register_public_key(&user, &old_key);
-
-    // Attacker never held this key and cannot revoke it
-    let new_key = String::from_str(&env, "ATTACKER_KEY");
-    client.revoke_key(&attacker, &old_key, &new_key);
-}
-
-#[test]
-#[should_panic(expected = "Public key has been revoked as compromised")]
-fn test_revoke_key_rejects_rotation_to_revoked_key() {
-=======
     let creator = Address::generate(&env);
     let g1 = Address::generate(&env);
     let keeper = Address::generate(&env);
@@ -584,31 +519,10 @@ fn test_revoke_key_rejects_rotation_to_revoked_key() {
 
 #[test]
 fn test_prove_life_by_keeper_fails_for_wrong_keeper() {
->>>>>>> main
     let env = Env::default();
     let contract_id = env.register_contract(None, SpooVaultStellar);
     let client = SpooVaultStellarClient::new(&env, &contract_id);
 
-<<<<<<< HEAD
-    let user = Address::generate(&env);
-    env.mock_all_auths();
-
-    let first_key = String::from_str(&env, "KEY_ONE");
-    let second_key = String::from_str(&env, "KEY_TWO");
-    let third_key = String::from_str(&env, "KEY_THREE");
-
-    client.register_public_key(&user, &first_key);
-    client.revoke_key(&user, &first_key, &second_key.clone());
-    client.revoke_key(&user, &second_key, &third_key);
-
-    // Rotating back to an already-blacklisted key must fail
-    client.revoke_key(&user, &third_key, &first_key);
-}
-
-#[test]
-#[should_panic(expected = "New key must differ from old key")]
-fn test_revoke_key_rejects_same_key_rotation() {
-=======
     let creator = Address::generate(&env);
     let g1 = Address::generate(&env);
     let keeper = Address::generate(&env);
@@ -635,24 +549,10 @@ fn test_revoke_key_rejects_same_key_rotation() {
 
 #[test]
 fn test_prove_life_by_keeper_fails_when_expired() {
->>>>>>> main
     let env = Env::default();
     let contract_id = env.register_contract(None, SpooVaultStellar);
     let client = SpooVaultStellarClient::new(&env, &contract_id);
 
-<<<<<<< HEAD
-    let user = Address::generate(&env);
-    env.mock_all_auths();
-
-    let key = String::from_str(&env, "SAME_KEY");
-    client.register_public_key(&user, &key);
-    client.revoke_key(&user, &key, &key);
-}
-
-#[test]
-#[should_panic(expected = "No registered public key for caller")]
-fn test_revoke_key_requires_registered_key() {
-=======
     let creator = Address::generate(&env);
     let g1 = Address::generate(&env);
     let keeper = Address::generate(&env);
@@ -676,19 +576,10 @@ fn test_revoke_key_requires_registered_key() {
 
 #[test]
 fn test_revoke_keeper_blocks_future_relays() {
->>>>>>> main
     let env = Env::default();
     let contract_id = env.register_contract(None, SpooVaultStellar);
     let client = SpooVaultStellarClient::new(&env, &contract_id);
 
-<<<<<<< HEAD
-    let user = Address::generate(&env);
-    env.mock_all_auths();
-
-    let old_key = String::from_str(&env, "NEVER_REGISTERED");
-    let new_key = String::from_str(&env, "NEW_KEY");
-    client.revoke_key(&user, &old_key, &new_key);
-=======
     let creator = Address::generate(&env);
     let g1 = Address::generate(&env);
     let keeper = Address::generate(&env);
@@ -738,6 +629,128 @@ fn test_authorize_keeper_rejects_non_creator() {
         result.is_err(),
         "expected authorization from a non-creator to fail"
     );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Compromised Key Rotation tests (Issue #156)
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_revoke_key_rotates_and_blacklists_old_key() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SpooVaultStellar);
+    let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    let old_key = String::from_str(&env, "OLD_COMPROMISED_KEY");
+    let new_key = String::from_str(&env, "NEW_ROTATED_KEY");
+
+    client.register_public_key(&user, &old_key);
+    assert_eq!(client.get_public_key(&user), Some(old_key.clone()));
+    assert!(!client.is_key_revoked(&old_key));
+
+    client.revoke_key(&user, &old_key, &new_key);
+
+    // Active key rotated to the new value
+    assert_eq!(client.get_public_key(&user), Some(new_key.clone()));
+    // Old key is permanently blacklisted
+    assert!(client.is_key_revoked(&old_key));
+    assert!(!client.is_key_revoked(&new_key));
+}
+
+#[test]
+#[should_panic(expected = "Public key has been revoked as compromised")]
+fn test_revoked_key_cannot_be_re_registered() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SpooVaultStellar);
+    let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    let old_key = String::from_str(&env, "OLD_COMPROMISED_KEY");
+    let new_key = String::from_str(&env, "NEW_ROTATED_KEY");
+
+    client.register_public_key(&user, &old_key);
+    client.revoke_key(&user, &old_key, &new_key);
+
+    // The compromised key can never be re-registered
+    client.register_public_key(&user, &old_key);
+}
+
+#[test]
+#[should_panic(expected = "Caller does not own the old public key")]
+fn test_revoke_key_requires_proof_of_possession() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SpooVaultStellar);
+    let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    env.mock_all_auths();
+
+    let old_key = String::from_str(&env, "USER_KEY");
+    client.register_public_key(&user, &old_key);
+    let attacker_key = String::from_str(&env, "ATTACKER_OWN_KEY");
+    client.register_public_key(&attacker, &attacker_key);
+
+    // Attacker never held this key and cannot revoke it
+    let new_key = String::from_str(&env, "ATTACKER_KEY");
+    client.revoke_key(&attacker, &old_key, &new_key);
+}
+
+#[test]
+#[should_panic(expected = "Cannot rotate to a revoked public key")]
+fn test_revoke_key_rejects_rotation_to_revoked_key() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SpooVaultStellar);
+    let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    let first_key = String::from_str(&env, "KEY_ONE");
+    let second_key = String::from_str(&env, "KEY_TWO");
+    let third_key = String::from_str(&env, "KEY_THREE");
+
+    client.register_public_key(&user, &first_key);
+    client.revoke_key(&user, &first_key, &second_key.clone());
+    client.revoke_key(&user, &second_key, &third_key);
+
+    // Rotating back to an already-blacklisted key must fail
+    client.revoke_key(&user, &third_key, &first_key);
+}
+
+#[test]
+#[should_panic(expected = "New key must differ from old key")]
+fn test_revoke_key_rejects_same_key_rotation() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SpooVaultStellar);
+    let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    let key = String::from_str(&env, "SAME_KEY");
+    client.register_public_key(&user, &key);
+    client.revoke_key(&user, &key, &key);
+}
+
+#[test]
+#[should_panic(expected = "No registered public key for caller")]
+fn test_revoke_key_requires_registered_key() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SpooVaultStellar);
+    let client = SpooVaultStellarClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+
+    let old_key = String::from_str(&env, "NEVER_REGISTERED");
+    let new_key = String::from_str(&env, "NEW_KEY");
+    client.revoke_key(&user, &old_key, &new_key);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1471,5 +1484,4 @@ mod upgrade_governance {
         client.migrate(&admin);
         client.migrate(&admin);
     }
->>>>>>> main
 }

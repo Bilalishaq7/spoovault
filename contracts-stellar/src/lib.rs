@@ -1,7 +1,4 @@
 #![no_std]
-<<<<<<< HEAD
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec};
-=======
 // Soroban SDK macros emit `cfg(testutils)` which newer rustc check-cfg flags.
 #![allow(unexpected_cfgs)]
 // Public contract entrypoints intentionally take many args (env + auth + payload).
@@ -12,7 +9,6 @@ use soroban_sdk::{
     xdr::ToXdr,
     Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
->>>>>>> main
 
 /// Zero-pads a `u64` into a 32-byte big-endian word, matching how Solidity's
 /// `abi.encodePacked` serializes a `uint256`.
@@ -200,10 +196,8 @@ pub enum DataKey {
     EvmToStellar(String),
     StellarToEvm(Address),
     EvmToPubKey(String),
-<<<<<<< HEAD
     // Compromised key revocation registry (issue #156): revoked public key => true
     RevokedKey(String),
-=======
     // Cross-Chain Revocation Broadcast Engine
     VaultGid(BytesN<32>),
     CrossChainRevoker(u64),
@@ -213,7 +207,6 @@ pub enum DataKey {
     AdminThreshold,
     UpgradeProposal,
     SchemaVersion,
->>>>>>> main
 }
 
 #[contract]
