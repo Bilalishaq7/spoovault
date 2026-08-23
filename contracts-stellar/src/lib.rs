@@ -215,6 +215,15 @@ pub enum DataKey {
     AdminThreshold,
     UpgradeProposal,
     SchemaVersion,
+    // Vault access tokens: a SEP-41-inspired, per-vault non-fungible
+    // membership credential (mint_access_token / burn_access_token /
+    // transfer / owner_of / balance).
+    TokenCount,
+    TokenOwner(u64),
+    TokenVault(u64),
+    TokenUri(u64),
+    OwnerBalance(Address),
+    VaultTokenBalance(u64, Address),
 }
 
 #[contract]
@@ -1595,6 +1604,221 @@ impl SpooVaultStellar {
         state
     }
 
+    // ── Vault access tokens ─────────────────────────────────────────────
+    //
+    // A tradeable, non-fungible membership credential bound to a vault:
+    // holding one is what `has_vault_token` reports to external verifiers
+    // (Stellar DEXs, wallets, other contracts). This mirrors the EVM sibling
+    // contract's ERC-721-based `mintAccessToken`/`burnAccessToken`/
+    // `hasVaultToken`/`getTokenVault`, adapted to Soroban idioms.
+    //
+    // The acceptance criteria for this feature ask for SEP-41-style
+    // `balance`/`transfer` alongside per-token `owner`/`mint`/`burn` -
+    // SEP-41 itself is a *fungible* token interface (amounts, no per-unit
+    // identity), which is fundamentally incompatible with a discrete,
+    // individually-owned credential. Rather than force a fungible interface
+    // onto NFT semantics, `balance` keeps SEP-41's name and purpose (an
+    // address's holding count) while `transfer`/`mint_access_token`/
+    // `burn_access_token`/`owner_of` operate on a specific `token_id`, as
+    // ERC-721 (this feature's own stated inspiration) and the EVM sibling
+    // contract already do.
+    //
+    // A holder's vault access is tracked as a *count* (`VaultTokenBalance`),
+    // not a single token_id, so minting more than one token to the same
+    // holder for the same vault and later burning/transferring just one of
+    // them composes correctly - `has_vault_token` only flips to false once
+    // every token for that vault has left their hands.
+
+    /// Mint a new vault access token bound to `vault_id`, granting `to` a
+    /// tradeable membership credential. Only an existing guardian of the
+    /// vault may mint, and the vault must still be active - mirroring the
+    /// EVM sibling contract's `OnlyGuardian`/`VaultNotActive` guards.
+    pub fn mint_access_token(
+        env: Env,
+        minter: Address,
+        vault_id: u64,
+        to: Address,
+        token_uri: String,
+    ) -> u64 {
+        minter.require_auth();
+        Self::bump_instance(&env);
+
+        let vault: Vault = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Vault(vault_id))
+            .expect("Vault not found");
+        assert!(vault.is_active, "Vault not active");
+
+        let is_guard: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IsGuardian(vault_id, minter))
+            .unwrap_or(false);
+        assert!(is_guard, "Only guardians can mint access tokens");
+
+        let token_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenCount)
+            .unwrap_or(0);
+        let next_token_id = token_count + 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::TokenCount, &next_token_id);
+
+        let owner_key = DataKey::TokenOwner(next_token_id);
+        let token_vault_key = DataKey::TokenVault(next_token_id);
+        let uri_key = DataKey::TokenUri(next_token_id);
+
+        env.storage().persistent().set(&owner_key, &to);
+        env.storage().persistent().set(&token_vault_key, &vault_id);
+        env.storage().persistent().set(&uri_key, &token_uri);
+        Self::bump_persistent(&env, &owner_key);
+        Self::bump_persistent(&env, &token_vault_key);
+        Self::bump_persistent(&env, &uri_key);
+
+        Self::increment_owner_balance(&env, &to);
+        Self::increment_vault_balance(&env, vault_id, &to);
+
+        env.events().publish(
+            (Symbol::new(&env, "token_minted"), next_token_id, vault_id),
+            to,
+        );
+
+        next_token_id
+    }
+
+    /// Burn an access token. Only the current owner may burn their own
+    /// token; doing so relinquishes the vault access it represented as soon
+    /// as their balance for that vault reaches zero.
+    pub fn burn_access_token(env: Env, owner: Address, token_id: u64) {
+        owner.require_auth();
+        Self::bump_instance(&env);
+
+        let owner_key = DataKey::TokenOwner(token_id);
+        let current_owner: Address = env
+            .storage()
+            .persistent()
+            .get(&owner_key)
+            .expect("Token does not exist");
+        assert!(current_owner == owner, "Not token owner");
+
+        let vault_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenVault(token_id))
+            .expect("Token vault binding missing");
+
+        Self::decrement_owner_balance(&env, &owner);
+        Self::decrement_vault_balance(&env, vault_id, &owner);
+
+        env.storage().persistent().remove(&owner_key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TokenVault(token_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TokenUri(token_id));
+
+        env.events()
+            .publish((Symbol::new(&env, "token_burned"), token_id), owner);
+    }
+
+    /// Transfer a vault access token. Vault access (as reported by
+    /// `has_vault_token`) moves to `to` as soon as this call succeeds, and
+    /// is relinquished by `from` once their balance for that vault reaches
+    /// zero.
+    pub fn transfer(env: Env, from: Address, to: Address, token_id: u64) {
+        from.require_auth();
+        Self::bump_instance(&env);
+
+        let owner_key = DataKey::TokenOwner(token_id);
+        let current_owner: Address = env
+            .storage()
+            .persistent()
+            .get(&owner_key)
+            .expect("Token does not exist");
+        assert!(current_owner == from, "Not token owner");
+
+        let vault_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenVault(token_id))
+            .expect("Token vault binding missing");
+
+        Self::decrement_owner_balance(&env, &from);
+        Self::decrement_vault_balance(&env, vault_id, &from);
+        Self::increment_owner_balance(&env, &to);
+        Self::increment_vault_balance(&env, vault_id, &to);
+
+        env.storage().persistent().set(&owner_key, &to);
+        Self::bump_persistent(&env, &owner_key);
+
+        env.events().publish(
+            (Symbol::new(&env, "token_transferred"), token_id),
+            (from, to),
+        );
+    }
+
+    /// Current owner of a vault access token. Panics if the token doesn't
+    /// exist, mirroring ERC-721's `ownerOf` revert-on-nonexistent-token
+    /// behavior.
+    pub fn owner_of(env: Env, token_id: u64) -> Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenOwner(token_id))
+            .expect("Token does not exist")
+    }
+
+    /// Number of vault access tokens held by `id`, across all vaults.
+    pub fn balance(env: Env, id: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OwnerBalance(id))
+            .unwrap_or(0)
+    }
+
+    /// Vault a token is bound to (0 if the token doesn't exist or was
+    /// burned), mirroring the EVM sibling contract's `getTokenVault`.
+    pub fn get_token_vault(env: Env, token_id: u64) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenVault(token_id))
+            .unwrap_or(0)
+    }
+
+    /// Whether `user` currently holds any access token for `vault_id`.
+    pub fn has_vault_token(env: Env, user: Address, vault_id: u64) -> bool {
+        let balance: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTokenBalance(vault_id, user))
+            .unwrap_or(0);
+        balance > 0
+    }
+
+    /// Metadata URI for a token. Panics if the token doesn't exist,
+    /// mirroring the EVM sibling contract's `tokenURI` (which itself calls
+    /// `ownerOf` as an existence guard).
+    pub fn get_token_uri(env: Env, token_id: u64) -> String {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenUri(token_id))
+            .expect("Token does not exist")
+    }
+
+    /// Extend persistent storage TTL for a vault access token.
+    pub fn extend_token_ttl(env: Env, token_id: u64) {
+        Self::bump_instance(&env);
+        let owner_key = DataKey::TokenOwner(token_id);
+        if env.storage().persistent().has(&owner_key) {
+            Self::bump_persistent(&env, &owner_key);
+            Self::bump_persistent(&env, &DataKey::TokenVault(token_id));
+            Self::bump_persistent(&env, &DataKey::TokenUri(token_id));
+        }
+    }
+
     /// Perform a deep, contract-authorized cross-contract call notifying an
     /// external registry that document access was granted.
     ///
@@ -1692,6 +1916,39 @@ impl SpooVaultStellar {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+    }
+
+    // Helper functions for vault access token balance bookkeeping.
+    fn increment_owner_balance(env: &Env, owner: &Address) {
+        let key = DataKey::OwnerBalance(owner.clone());
+        let balance: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(balance + 1));
+        Self::bump_persistent(env, &key);
+    }
+
+    fn decrement_owner_balance(env: &Env, owner: &Address) {
+        let key = DataKey::OwnerBalance(owner.clone());
+        let balance: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&key, &balance.saturating_sub(1));
+        Self::bump_persistent(env, &key);
+    }
+
+    fn increment_vault_balance(env: &Env, vault_id: u64, owner: &Address) {
+        let key = DataKey::VaultTokenBalance(vault_id, owner.clone());
+        let balance: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(balance + 1));
+        Self::bump_persistent(env, &key);
+    }
+
+    fn decrement_vault_balance(env: &Env, vault_id: u64, owner: &Address) {
+        let key = DataKey::VaultTokenBalance(vault_id, owner.clone());
+        let balance: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&key, &balance.saturating_sub(1));
+        Self::bump_persistent(env, &key);
     }
 }
 

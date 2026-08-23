@@ -1206,8 +1206,10 @@ const mintAccessToken = async (
   tokenURI: string
 ): Promise<number> => {
   if (isConfigured()) {
+    if (!activeAccount) throw new Error("Wallet not connected");
     try {
       const tokenId = await executeSorobanCall("mint_access_token", [
+        activeAccount,
         vaultId,
         to,
         tokenURI
