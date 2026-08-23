@@ -2,6 +2,8 @@
 
 interface ImportMetaEnv {
   readonly VITE_CONTRACT_ADDRESS?: string;
+  readonly VITE_STELLAR_CONTRACT_ADDRESS?: string;
+  readonly VITE_STELLAR_RPC_URL?: string;
   readonly VITE_PINATA_API_KEY?: string;
   readonly VITE_PINATA_API_SECRET?: string;
   readonly VITE_PINATA_JWT?: string;
@@ -16,6 +18,13 @@ interface ImportMetaEnv {
   readonly VITE_SPOOVUALT_PROXY_SECRET?: string;
   readonly VITE_LOG_CHUNK_SIZE?: string;
   readonly VITE_CONTRACT_DEPLOY_BLOCK?: string;
+  readonly VITE_PIR_ENABLED?: string;
+  readonly VITE_PIR_USE_TOR?: string;
+  readonly VITE_PIR_TOR_HOST?: string;
+  readonly VITE_PIR_TOR_PORT?: string;
+  readonly VITE_PIR_DUMMY_COUNT?: string;
+  readonly VITE_PIR_BATCH_DELAY?: string;
+  readonly VITE_SOROBAN_EVENT_RELAY_URL?: string;
 }
 
 interface ImportMeta {
