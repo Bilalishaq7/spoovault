@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { time } = require("@nomicfoundation/hardhat-network-helpers");
+const { time, mine } = require("@nomicfoundation/hardhat-network-helpers");
 
 const EMERGENCY_ONLY = 2; // ReleaseCondition.EMERGENCY_ONLY
 const BASE_DELAY = 600; // 10 minutes in seconds
@@ -295,8 +295,9 @@ describe("SpooVault VRF Emergency Unlock Delay Randomization", function () {
       await configureVrf();
       await enableEmergency(); // pending, never fulfilled
 
-      // Advance beyond the default 30-day inactivity period.
+      // Advance beyond the default 30-day inactivity period and mine sufficient blocks.
       await time.increase(31 * 24 * 60 * 60);
+      await mine(260);
 
       const state = await spooVault.getVaultReleaseState(vaultId);
       expect(state.postDeathUnlocked).to.equal(true);
