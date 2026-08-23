@@ -106,15 +106,18 @@ const wipeCachedPrivateKey = (account: string): void => {
   const cached = sessionKeyCache.get(account);
   if (!cached) return;
 
-  const cryptoApi =
-    typeof globalThis !== "undefined" && globalThis.crypto
-      ? globalThis.crypto
-      : undefined;
-  if (cryptoApi) {
-    cryptoApi.getRandomValues(cached);
-  } else {
-    cached.fill(0);
+  try {
+    const cryptoApi =
+      typeof globalThis !== "undefined" && globalThis.crypto
+        ? globalThis.crypto
+        : undefined;
+    if (cryptoApi && typeof cryptoApi.getRandomValues === "function") {
+      cryptoApi.getRandomValues(new Uint8Array(cached.buffer, cached.byteOffset, cached.byteLength));
+    }
+  } catch {
+    // Ignore buffer type mismatch in mock test runners
   }
+  cached.fill(0);
   sessionKeyCache.delete(account);
 };
 
@@ -727,7 +730,7 @@ export const clientKeyringService = {
       await idbPut(updatedRecord);
     }
 
-    sessionKeyCache.set(normalized, privateKey);
+    cachePrivateKey(normalized, privateKey);
 
     return { publicKey };
   },
@@ -797,7 +800,7 @@ export const clientKeyringService = {
     ) {
       try {
         const privateKey = await decryptRecordWithPasskey(record);
-        sessionKeyCache.set(normalized, privateKey);
+        cachePrivateKey(normalized, privateKey);
         return privateKey;
       } catch (err) {
         const cancelled = err instanceof WebAuthnError && err.code === "NOT_ALLOWED";
