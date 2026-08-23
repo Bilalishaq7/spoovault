@@ -12,11 +12,7 @@ import {
   FiArrowUpRight,
 } from "react-icons/fi";
 import { formatDistanceToNow } from "date-fns";
-import {
-  VaultData,
-  DocumentData,
-  ActivityEvent,
-} from "../../services/contract.service";
+import { VaultData, DocumentData, ActivityEvent } from "../../services/contract.service";
 import { auditService } from "../../services/audit.service";
 import { getExplorerTxUrl } from "../../utils/explorer";
 import { toast } from "react-hot-toast";
@@ -60,14 +56,10 @@ export const AuditLogTimeline: React.FC<AuditLogTimelineProps> = ({
 
   const getEventIcon = (action: string) => {
     const act = action.toUpperCase();
-    if (act.includes("VAULT"))
-      return <FiPlusCircle className="w-4 h-4 text-indigo-400" />;
-    if (act.includes("DOC") || act.includes("FILE"))
-      return <FiFileText className="w-4 h-4 text-cyan-400" />;
-    if (act.includes("GUARDIAN") || act.includes("APPROV"))
-      return <FiShield className="w-4 h-4 text-emerald-400" />;
-    if (act.includes("KEY") || act.includes("SHARE"))
-      return <FiKey className="w-4 h-4 text-amber-400" />;
+    if (act.includes("VAULT")) return <FiPlusCircle className="w-4 h-4 text-indigo-400" />;
+    if (act.includes("DOC") || act.includes("FILE")) return <FiFileText className="w-4 h-4 text-cyan-400" />;
+    if (act.includes("GUARDIAN") || act.includes("APPROV")) return <FiShield className="w-4 h-4 text-emerald-400" />;
+    if (act.includes("KEY") || act.includes("SHARE")) return <FiKey className="w-4 h-4 text-amber-400" />;
     return <FiClock className="w-4 h-4 text-slate-400" />;
   };
 
@@ -80,8 +72,7 @@ export const AuditLogTimeline: React.FC<AuditLogTimelineProps> = ({
             Audit & Compliance Log
           </h3>
           <p className="text-xs text-slate-400 mt-0.5">
-            Cryptographically verifiable history for Vault #
-            {vault ? vault.id : "Global"}
+            Cryptographically verifiable history for Vault #{vault ? vault.id : "Global"}
           </p>
         </div>
 
@@ -138,39 +129,36 @@ export const AuditLogTimeline: React.FC<AuditLogTimelineProps> = ({
                     {getEventIcon(act.action)}
                   </div>
 
-              <div className="bg-slate-800/40 hover:bg-slate-800/70 border border-slate-700/50 rounded-lg p-3.5 transition-all">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-slate-200">
-                    {act.action}
-                  </span>
-                  <span className="text-xs text-slate-400 font-mono">
-                    {formatDistanceToNow(act.timestamp * 1000, {
-                      addSuffix: true,
-                    })}
-                  </span>
-                </div>
+                  <div className="bg-slate-800/40 hover:bg-slate-800/70 border border-slate-700/50 rounded-lg p-3.5 transition-all">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-semibold text-slate-200">
+                        {act.action}
+                      </span>
+                      <span className="text-xs text-slate-400 font-mono">
+                        {formatDistanceToNow(act.timestamp * 1000, { addSuffix: true })}
+                      </span>
+                    </div>
 
-                <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-800/80 text-xs">
-                  <span className="text-slate-400 font-mono">
-                    Actor:{" "}
-                    <span className="text-slate-300 font-sans">
-                      {act.actor}
-                    </span>
-                  </span>
-                  <div className="flex items-center gap-3">
-                    {act.txHash && (
-                      <a
-                        href={getExplorerTxUrl(act.txHash, act.network)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center text-blue-400 hover:text-blue-300 font-medium"
-                      >
-                        Tx <FiArrowUpRight className="w-3 h-3 ml-0.5" />
-                      </a>
-                    )}
-                    <span className="inline-flex items-center text-emerald-400 font-medium">
-                      <FiCheckCircle className="w-3 h-3 mr-1" /> {act.status}
-                    </span>
+                    <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-800/80 text-xs">
+                      <span className="text-slate-400 font-mono">
+                        Actor: <span className="text-slate-300 font-sans">{act.actor}</span>
+                      </span>
+                      <div className="flex items-center gap-3">
+                        {act.txHash && (
+                          <a
+                            href={getExplorerTxUrl(act.txHash, act.network)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center text-blue-400 hover:text-blue-300 font-medium"
+                          >
+                            Tx <FiArrowUpRight className="w-3 h-3 ml-0.5" />
+                          </a>
+                        )}
+                        <span className="inline-flex items-center text-emerald-400 font-medium">
+                          <FiCheckCircle className="w-3 h-3 mr-1" /> {act.status}
+                        </span>
+                      </div>
+                    </div>
                   </div>
                 </div>
               );
