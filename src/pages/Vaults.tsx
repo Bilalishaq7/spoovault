@@ -41,10 +41,11 @@ import {
   VaultData,
   VaultReleaseState,
 } from "../services/contract.service";
-import { shortenAddress, isValidMultiChainAddress, formatDate, getVaultGID, buildVaultDocumentCounts, keyRecordByVaultGID } from "../utils/helpers";
+import { shortenAddress, isValidAddress, isValidMultiChainAddress, formatDate, getVaultGID, buildVaultDocumentCounts, keyRecordByVaultGID } from "../utils/helpers";
 import { identityService } from "../services/identity.service";
 import { toast } from "react-hot-toast";
 import { buttonClasses } from "../utils/buttonClasses";
+import { pushNotificationService } from "../services/pushNotification.service";
 
 interface Vault extends VaultData {
   gid: string;
@@ -72,6 +73,7 @@ const Vaults = () => {
     newGuardian: "",
     approvalThreshold: 1,
     inactivityDays: 30,
+    beneficiaryAddress: "",
   });
 
   useEffect(() => {
@@ -112,7 +114,8 @@ const Vaults = () => {
     try {
       const vaultsData = await contractService.fetchVaultsForAccount(account);
       const docsData = await contractService.fetchDocumentsForVaults(
-        vaultsData.map((vault) => vault.id)
+        vaultsData.map((vault) => vault.id),
+        account
       );
 
       const visibleVaults = vaultsData;
@@ -219,11 +222,22 @@ const Vaults = () => {
       return;
     }
 
+    if (!formData.beneficiaryAddress.trim()) {
+      toast.error("A beneficiary wallet address is required");
+      return;
+    }
+
+    if (!isValidAddress(formData.beneficiaryAddress, "avalanche")) {
+      toast.error("Invalid beneficiary Ethereum address");
+      return;
+    }
+
     const draftForm = {
       ...formData,
       name: formData.name.trim(),
       description: formData.description.trim(),
       guardians: [...formData.guardians],
+      beneficiaryAddress: formData.beneficiaryAddress.trim(),
     };
 
     setCreating(true);
@@ -286,6 +300,16 @@ const Vaults = () => {
               : "Vault created, but release policy setup was skipped";
           toast.error(policyMessage);
         }
+
+        try {
+          await contractService.setBeneficiary(vaultId, draftForm.beneficiaryAddress);
+        } catch (beneficiaryError) {
+          const beneficiaryMessage =
+            beneficiaryError instanceof Error
+              ? beneficiaryError.message
+              : "Vault created, but beneficiary setup was skipped";
+          toast.error(beneficiaryMessage);
+        }
       }
 
       setFormData({
@@ -295,6 +319,7 @@ const Vaults = () => {
         newGuardian: "",
         approvalThreshold: 1,
         inactivityDays: 30,
+        beneficiaryAddress: "",
       });
 
       onClose();
@@ -311,6 +336,14 @@ const Vaults = () => {
     try {
       await contractService.setEmergencyMode(vaultId, enabled);
       toast.success(enabled ? "Emergency mode enabled" : "Emergency mode disabled");
+
+      try {
+        const beneficiary = await contractService.getBeneficiary(vaultId);
+        await pushNotificationService.notifyEmergencyModeChange(vaultId, beneficiary, enabled);
+      } catch (notifyError) {
+        console.error("Failed to send beneficiary push notification:", notifyError);
+      }
+
       await loadVaults();
     } catch (error: any) {
       toast.error(error.message || "Failed to update emergency mode");
@@ -895,6 +928,29 @@ const Vaults = () => {
                     <span>7 days</span>
                     <span>180 days</span>
                   </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-gray-800/85 bg-gray-900/78 p-4 sm:p-5 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-semibold">Beneficiary</p>
+                    <p className="text-xs text-gray-400">
+                      Wallet address notified when this vault enters emergency mode or unlocks post-death
+                    </p>
+                  </div>
+                  <Chip size="sm" variant="flat" className={stepChipClass}>
+                    Step 5
+                  </Chip>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-xs text-gray-300 font-medium">Beneficiary Address</p>
+                  <Input
+                    placeholder="Enter beneficiary's Ethereum address"
+                    value={formData.beneficiaryAddress}
+                    onValueChange={(value: string) => setFormData({ ...formData, beneficiaryAddress: value })}
+                    classNames={modalInputClassNames}
+                  />
                 </div>
               </div>
 

@@ -4,7 +4,11 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "./ISpooVault.sol";
+import "./IERC6551Registry.sol";
+import "./interfaces/IVRFCoordinatorV2Plus.sol";
 
 /**
  * @title SpooVault
@@ -13,12 +17,15 @@ import "./ISpooVault.sol";
  *      document access delegations through a standardized, ERC-165 discoverable
  *      interface.
  */
-contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
+contract SpooVault is ERC721, ISpooVault, ReentrancyGuard, EIP712 {
     using Strings for uint256;
     uint256 private _tokenIdCounter;
     uint256 private _vaultIdCounter;
     uint256 private _documentIdCounter;
     uint256 private _requestIdCounter;
+
+    address public erc6551Registry;
+    address public tbaImplementation;
 
     enum RequestStatus {
         PENDING,
@@ -85,6 +92,11 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         uint256 lastProofOfLifeBlock;
     }
 
+    struct KeeperAuthorization {
+        address keeper;
+        uint256 expiresAt;
+    }
+
     struct GuardianRemovalProposal {
         uint256 vaultId;
         address guardianToRemove;
@@ -104,6 +116,13 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         uint256 createdAt;
         uint256 expiresAt;
     }
+
+    error OnlyVrfCoordinator();
+    error VrfNotConfigured();
+    error VrfRequestAlreadyPending();
+    error VrfUnknownRequestId();
+    error VrfAlreadyFulfilled();
+    error InvalidJitterWindow();
 
     /// @dev Minimum number of blocks that must elapse since the last proof of
     /// life before post-death conditions can unlock, in addition to the
@@ -144,6 +163,25 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     error ProposalAlreadyExecuted();
     error ApprovalAlreadyGiven();
     error CannotSelfApproveAccess();
+    error ZeroAddressBeneficiary();
+    error BeneficiaryAlreadySet();
+    error InvalidNewPublicKey();
+    error KeyOwnershipProofFailed();
+    error KeyAlreadyRevoked();
+    error RevokedPublicKey();
+    error InvalidSigner();
+    error KeeperExpiryInPast();
+    error KeeperNotAuthorized();
+    error KeeperAuthorizationExpired();
+    error ReshareSessionAlreadyActive();
+    error ReshareSessionNotActive();
+    error ReshareDeadlineNotReached();
+    error ReshareDeadlineExceeded();
+    error ReshareIncomplete();
+    error InvalidZeroShareCommitment();
+    error ZeroShareAlreadySubmitted();
+    error InvalidShareRefreshInput();
+    error InvalidReshareDuration();
 
     mapping(uint256 => Vault) public vaults;
     mapping(uint256 => Document) public documents;
@@ -168,6 +206,12 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     // requestId => guardianAddress => encryptedShareForBeneficiary
     mapping(uint256 => mapping(address => string)) public beneficiaryKeyShares;
 
+    // Compromised key rotation and revocation registry (issue #156)
+    // keccak256(publicKey) => revoked flag; blacklisted keys can never be re-registered
+    mapping(bytes32 => bool) private _revokedKeyHashes;
+    // Number of times an account has rotated its encryption key
+    mapping(address => uint256) public keyRotationCount;
+
     // Access versions let us invalidate all prior document grants for a user+vault in O(1).
     mapping(uint256 => mapping(address => uint256)) private _vaultAccessVersion;
     mapping(uint256 => mapping(address => uint256)) private _documentAccessVersion;
@@ -183,12 +227,86 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     // (via link_cross_chain_vault) need this enabled.
     mapping(uint256 => bool) public crossChainRevocationEnabled;
     mapping(uint256 => VaultReleaseState) private _vaultReleaseStates;
+    mapping(uint256 => address) private _vaultBeneficiary;
+
+    // ------------------------------------------------------------------
+    // VRF-backed emergency unlock delay (issue #93).
+    //
+    // When VRF is configured, enabling emergency mode requests verifiable
+    // randomness from a Chainlink VRF v2.5 coordinator. The fulfillment
+    // derives an unpredictable jitter offset that is added to the base
+    // unlock delay, so neither miners, guardians nor the vault owner can
+    // predict or manipulate the exact block at which emergency documents
+    // become releasable (anti front-running / sandwich protection).
+    // ------------------------------------------------------------------
+    uint256 public constant EMERGENCY_UNLOCK_BASE_DELAY = 10 minutes;
+    uint256 public constant DEFAULT_EMERGENCY_JITTER_WINDOW = 1 hours;
+    uint256 public constant MIN_JITTER_WINDOW = 5 minutes;
+    uint256 public constant MAX_JITTER_WINDOW = 7 days;
+
+    struct VrfConfig {
+        address coordinator; // address(0) => VRF gating disabled (legacy behavior)
+        bytes32 keyHash;
+        uint256 subscriptionId;
+        uint32 callbackGasLimit;
+        uint16 minimumRequestConfirmations;
+    }
+
+    VrfConfig private _vrfConfig;
+    address private immutable _vrfDeployer;
+
+    // vaultId => scheduled emergency unlock timestamp (0 = not scheduled)
+    mapping(uint256 => uint256) public emergencyUnlockAt;
+    // vaultId => latest VRF request id
+    mapping(uint256 => uint256) public vrfRequestIdByVault;
+    // requestId => vaultId (reverse lookup for fulfillment)
+    mapping(uint256 => uint256) private _vaultIdByRequestId;
+    // vaultId => jitter window applied to the VRF offset
+    mapping(uint256 => uint256) public emergencyJitterWindow;
 
     // Guardian rotation and threshold adjustment governance
     mapping(uint256 => mapping(address => GuardianRemovalProposal)) public guardianRemovalProposals;
     mapping(uint256 => mapping(uint256 => ThresholdUpdateProposal)) public thresholdUpdateProposals;
     mapping(uint256 => mapping(address => mapping(address => bool))) public hasApprovedRemoval;
     mapping(uint256 => mapping(uint256 => mapping(address => bool))) public hasApprovedThreshold;
+
+    event EmergencyUnlockDelayRequested(uint256 indexed vaultId, uint256 indexed requestId);
+    event EmergencyUnlockScheduled(uint256 indexed vaultId, uint256 indexed unlockAt, uint256 jitterSeconds);
+    event VrfConfigured(address indexed coordinator, bytes32 keyHash, uint256 subscriptionId);
+    event EmergencyJitterWindowSet(uint256 indexed vaultId, uint256 jitterWindow);
+
+    // Web3 Keeper (Chainlink Automation / Gelato) proof-of-life relay delegation
+    bytes32 private constant KEEPER_AUTHORIZATION_TYPEHASH =
+        keccak256("KeeperAuthorization(uint256 vaultId,address keeper,uint256 expiresAt,uint256 nonce)");
+    mapping(uint256 => KeeperAuthorization) public keeperAuthorizations;
+    mapping(uint256 => uint256) public keeperAuthNonces;
+
+    // ------------------------------------------------------------------
+    // Proactive Secret Sharing (PSS) state.
+    //
+    // Guardians refresh their Shamir shares of a document's master key via
+    // the zero-sharing protocol: each guardian i publishes Feldman-style
+    // commitments to a zero-polynomial h_i(x) with h_i(0) = 0, every
+    // guardian then updates S_j' = S_j + sum_i h_i(j). The master secret
+    // S(0) is preserved while all old shares become useless.
+    // ------------------------------------------------------------------
+    struct ReshareSession {
+        uint256 startedAt;
+        uint256 deadline;
+        uint256 submittedCount;
+        bool active;
+    }
+
+    // documentId => active reshare session
+    mapping(uint256 => ReshareSession) public reshareSessions;
+    // documentId => current share epoch (increments on every successful refresh)
+    mapping(uint256 => uint256) public shareEpoch;
+    // documentId => epoch => guardian => commitments[0..degree] where
+    // commitments[k] represents the coefficient commitment of h_i(x).
+    // commitments[0] is always bytes32(0) because h_i(0) = 0.
+    mapping(uint256 => mapping(uint256 => mapping(address => bytes32[]))) public zeroShareCommitments;
+    // documentId => epoch => guardian => whether the zero-share was submitted
+    mapping(uint256 => mapping(uint256 => mapping(address => bool))) private _zeroShareSubmitted;
 
     event VaultCreated(uint256 indexed vaultId, address indexed creator, string name);
     event GuardianAdded(uint256 indexed vaultId, address indexed guardian);
@@ -211,8 +329,10 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         string vaultGid
     );
     event EmergencyModeUpdated(uint256 indexed vaultId, bool enabled);
+    event BeneficiarySet(uint256 indexed vaultId, address indexed beneficiary);
     event DocumentReleaseConditionSet(uint256 indexed documentId, ReleaseCondition condition);
     event PublicKeyRegistered(address indexed user, string publicKey);
+    event KeyRevoked(address indexed user, string oldPublicKey, string newPublicKey, uint256 rotationCount);
     event GuardianSharesSaved(uint256 indexed documentId);
     event ShareSubmittedForBeneficiary(uint256 indexed requestId, address indexed guardian, string encryptedShare);
     event GuardianRemovalProposed(uint256 indexed vaultId, address indexed guardian, address indexed proposedBy);
@@ -220,12 +340,55 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
     event ThresholdUpdateProposed(uint256 indexed vaultId, uint256 newThreshold, address indexed proposedBy);
     event ThresholdUpdateApproved(uint256 indexed vaultId, uint256 newThreshold, address indexed approver);
     event VaultReconfigurationExecuted(uint256 indexed vaultId, address indexed guardianRemoved, uint256 newThreshold);
+    event KeeperAuthorized(uint256 indexed vaultId, address indexed owner, address indexed keeper, uint256 expiresAt);
+    event KeeperRevoked(uint256 indexed vaultId, address indexed owner);
+    event ProofOfLifeRelayed(uint256 indexed vaultId, address indexed owner, address indexed keeper, uint256 timestamp);
+    event ShareRefreshStarted(uint256 indexed documentId, uint256 indexed epoch, uint256 deadline);
+    event ZeroShareCommitmentSubmitted(uint256 indexed documentId, uint256 indexed epoch, address indexed guardian, uint256 degree);
+    event SharesRefreshed(uint256 indexed documentId, uint256 indexed epoch);
 
     /// @notice Registers the caller's ECIES/X25519 encryption public key.
     /// @param publicKey The public key string to store for `msg.sender`.
+    /// @dev Reverts with `RevokedPublicKey` if the key was previously revoked as compromised.
     function registerPublicKey(string calldata publicKey) external {
+        if (_revokedKeyHashes[keccak256(bytes(publicKey))]) revert RevokedPublicKey();
         userPublicKeys[msg.sender] = publicKey;
         emit PublicKeyRegistered(msg.sender, publicKey);
+    }
+
+    /// @notice Revokes a compromised public key and atomically rotates to a new one.
+    /// @param oldPublicKey The compromised public key currently registered to `msg.sender`.
+    /// @param newPublicKey The fresh replacement public key.
+    /// @dev Proof of possession: only the account whose registered key equals `oldPublicKey`
+    ///      may revoke it. The old key is permanently blacklisted: it can never be
+    ///      re-registered and any contract call path that submits key material using it
+    ///      is rejected while it remains the caller's registered key.
+    function revokeKey(string calldata oldPublicKey, string calldata newPublicKey) external nonReentrant {
+        bytes32 oldHash = keccak256(bytes(oldPublicKey));
+        bytes32 newHash = keccak256(bytes(newPublicKey));
+
+        if (bytes(newPublicKey).length == 0) revert InvalidNewPublicKey();
+        if (oldHash == newHash) revert InvalidNewPublicKey();
+        if (_revokedKeyHashes[newHash]) revert RevokedPublicKey();
+
+        string memory currentKey = userPublicKeys[msg.sender];
+        if (bytes(currentKey).length == 0 || keccak256(bytes(currentKey)) != oldHash) {
+            revert KeyOwnershipProofFailed();
+        }
+        if (_revokedKeyHashes[oldHash]) revert KeyAlreadyRevoked();
+
+        _revokedKeyHashes[oldHash] = true;
+        userPublicKeys[msg.sender] = newPublicKey;
+        unchecked {
+            keyRotationCount[msg.sender] += 1;
+        }
+
+        emit KeyRevoked(msg.sender, oldPublicKey, newPublicKey, keyRotationCount[msg.sender]);
+    }
+
+    /// @notice Returns true if the given public key has been revoked as compromised.
+    function isKeyRevoked(string calldata publicKey) external view returns (bool) {
+        return _revokedKeyHashes[keccak256(bytes(publicKey))];
     }
 
     /// @notice Returns the encrypted guardian share stored for a document/guardian pair.
@@ -244,7 +407,35 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         return beneficiaryKeyShares[requestId][guardian];
     }
 
-    constructor() ERC721("SpooVault Access Token", "SPVT") {}
+    constructor() ERC721("SpooVault Access Token", "SPVT") EIP712("SpooVault", "1") {
+        _vrfDeployer = msg.sender;
+    }
+
+    /**
+     * @dev Initialize ERC-6551 Token Bound Account support.
+     * Can only be called once to set the registry and implementation addresses.
+     */
+    function initializeERC6551(address registry, address implementation) external {
+        if (erc6551Registry != address(0)) revert("ERC6551 already initialized");
+        erc6551Registry = registry;
+        tbaImplementation = implementation;
+    }
+
+    /**
+     * @dev Computes the deterministic Token Bound Account address for a given vault NFT.
+     */
+    function computeVaultAccount(uint256 tokenId) external view returns (address) {
+        if (erc6551Registry == address(0) || tbaImplementation == address(0)) {
+            revert("ERC6551 not initialized");
+        }
+        return IERC6551Registry(erc6551Registry).account(
+            tbaImplementation,
+            block.chainid,
+            address(this),
+            tokenId,
+            0
+        );
+    }
 
     /**
      * @dev Create a new vault with guardian invites.
@@ -456,9 +647,78 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
         if (!vaults[vaultId].isActive) revert VaultNotActive();
 
+        _recordProofOfLife(vaultId);
+    }
+
+    /**
+     * @dev Register a Web3 Keeper (Chainlink Automation / Gelato) to relay proof-of-life
+     *      heartbeats on behalf of `vaults[vaultId].creator` until `expiresAt`, using an
+     *      EIP-712 typed signature produced off-chain by the vault creator. Anyone (typically
+     *      the keeper itself) can submit this signed grant on-chain; the signature alone
+     *      proves the creator's consent, so this never needs to be sent from the creator's
+     *      own wallet. Superseding an active grant via a fresh signature or {revokeKeeper}
+     *      immediately invalidates the previous one.
+     */
+    function authorizeKeeperBySig(
+        uint256 vaultId,
+        address keeper,
+        uint256 expiresAt,
+        bytes calldata signature
+    ) external {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        if (!vaults[vaultId].isActive) revert VaultNotActive();
+        if (expiresAt <= block.timestamp) revert KeeperExpiryInPast();
+
+        uint256 nonce = keeperAuthNonces[vaultId];
+        bytes32 structHash = keccak256(
+            abi.encode(KEEPER_AUTHORIZATION_TYPEHASH, vaultId, keeper, expiresAt, nonce)
+        );
+        address signer = ECDSA.recover(_hashTypedDataV4(structHash), signature);
+        if (signer != vaults[vaultId].creator) revert InvalidSigner();
+
+        keeperAuthNonces[vaultId] = nonce + 1;
+        keeperAuthorizations[vaultId] = KeeperAuthorization({keeper: keeper, expiresAt: expiresAt});
+
+        emit KeeperAuthorized(vaultId, signer, keeper, expiresAt);
+    }
+
+    /**
+     * @dev Owner revokes any active keeper authorization for their vault.
+     */
+    function revokeKeeper(uint256 vaultId) external {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
+
+        delete keeperAuthorizations[vaultId];
+        emit KeeperRevoked(vaultId, msg.sender);
+    }
+
+    /**
+     * @dev Web3 Keeper relay of a proof-of-life heartbeat, gated on a previously
+     *      registered {authorizeKeeperBySig} grant instead of the creator's own tx.
+     *      Prevents a keeper outage or an owner who simply prefers automation from
+     *      triggering a false emergency unlock.
+     */
+    function proveLifeByKeeper(uint256 vaultId) external {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        if (!vaults[vaultId].isActive) revert VaultNotActive();
+
+        KeeperAuthorization storage authorization = keeperAuthorizations[vaultId];
+        if (authorization.keeper != msg.sender) revert KeeperNotAuthorized();
+        if (block.timestamp >= authorization.expiresAt) revert KeeperAuthorizationExpired();
+
+        _recordProofOfLife(vaultId);
+        emit ProofOfLifeRelayed(vaultId, vaults[vaultId].creator, msg.sender, block.timestamp);
+    }
+
+    /**
+     * @dev Shared proof-of-life state update used by both the direct owner path and
+     *      the keeper-relayed path.
+     */
+    function _recordProofOfLife(uint256 vaultId) internal {
         _vaultReleaseStates[vaultId].lastProofOfLife = block.timestamp;
         _vaultReleaseStates[vaultId].lastProofOfLifeBlock = block.number;
-        emit ProofOfLifeRecorded(vaultId, msg.sender, block.timestamp, getVaultGID(vaultId));
+        emit ProofOfLifeRecorded(vaultId, vaults[vaultId].creator, block.timestamp, getVaultGID(vaultId));
     }
 
     /// @notice Returns the stable cross-chain identifier for an EVM vault.
@@ -474,6 +734,9 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
 
     /**
      * @dev Owner can toggle emergency mode for rapid release workflows.
+     * When VRF is configured, enabling emergency mode additionally requests
+     * verifiable randomness; EMERGENCY_ONLY documents stay locked until the
+     * VRF-derived unlock time is reached (see {rawFulfillRandomWords}).
      */
     function setEmergencyMode(uint256 vaultId, bool enabled) external nonReentrant {
         if (vaults[vaultId].id == 0) revert VaultNotExist();
@@ -481,7 +744,159 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         if (!vaults[vaultId].isActive) revert VaultNotActive();
 
         _vaultReleaseStates[vaultId].emergencyMode = enabled;
+
+        if (_vrfConfig.coordinator != address(0)) {
+            if (enabled) {
+                if (vrfRequestIdByVault[vaultId] != 0 && !vrfRequestFulfilled(vaultId)) {
+                    revert VrfRequestAlreadyPending();
+                }
+                // Fresh episode: clear any previous schedule before re-rolling.
+                emergencyUnlockAt[vaultId] = 0;
+
+                uint256 requestId = IVRFCoordinatorV2Plus(_vrfConfig.coordinator).requestRandomWords(
+                    _vrfConfig.keyHash,
+                    _vrfConfig.subscriptionId,
+                    _vrfConfig.minimumRequestConfirmations,
+                    _vrfConfig.callbackGasLimit,
+                    1,
+                    ""
+                );
+                vrfRequestIdByVault[vaultId] = requestId;
+                _vaultIdByRequestId[requestId] = vaultId;
+                emit EmergencyUnlockDelayRequested(vaultId, requestId);
+            } else {
+                // Disabling emergency mode resets the schedule entirely.
+                delete vrfRequestIdByVault[vaultId];
+                emergencyUnlockAt[vaultId] = 0;
+            }
+        }
+
         emit EmergencyModeUpdated(vaultId, enabled);
+    }
+
+    /**
+     * @dev Owner-supplied beneficiary wallet address used to route emergency/post-death
+     * notifications. Settable once per vault; there is no update path by design.
+     */
+    function setBeneficiary(uint256 vaultId, address beneficiary) external nonReentrant {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
+        if (!vaults[vaultId].isActive) revert VaultNotActive();
+        if (beneficiary == address(0)) revert ZeroAddressBeneficiary();
+        if (_vaultBeneficiary[vaultId] != address(0)) revert BeneficiaryAlreadySet();
+
+        _vaultBeneficiary[vaultId] = beneficiary;
+        emit BeneficiarySet(vaultId, beneficiary);
+    }
+
+    /// @notice Returns the beneficiary wallet address configured for `vaultId`, or the zero address if unset.
+    function getBeneficiary(uint256 vaultId) external view returns (address) {
+        return _vaultBeneficiary[vaultId];
+    }
+
+    /**
+     * @dev Deployer configures the Chainlink VRF v2.5 coordinator. Passing
+     * the zero address disables VRF gating and restores legacy behavior
+     * (emergency access immediately available once mode is enabled).
+     */
+    function configureVrf(
+        address coordinator,
+        bytes32 keyHash,
+        uint256 subscriptionId,
+        uint32 callbackGasLimit,
+        uint16 minimumRequestConfirmations
+    ) external {
+        if (msg.sender != _vrfDeployer) revert OnlyVrfCoordinator();
+        _vrfConfig = VrfConfig({
+            coordinator: coordinator,
+            keyHash: keyHash,
+            subscriptionId: subscriptionId,
+            callbackGasLimit: callbackGasLimit,
+            minimumRequestConfirmations: minimumRequestConfirmations
+        });
+        emit VrfConfigured(coordinator, keyHash, subscriptionId);
+    }
+
+    /**
+     * @dev Vault creator tunes the jitter window Delta_T used to scale the
+     * VRF offset: T_random = VRF() mod Delta_T.
+     */
+    function setEmergencyJitterWindow(uint256 vaultId, uint256 jitterWindow) external {
+        if (vaults[vaultId].id == 0) revert VaultNotExist();
+        if (vaults[vaultId].creator != msg.sender) revert OnlyVaultCreator();
+        if (jitterWindow < MIN_JITTER_WINDOW || jitterWindow > MAX_JITTER_WINDOW) {
+            revert InvalidJitterWindow();
+        }
+
+        emergencyJitterWindow[vaultId] = jitterWindow;
+        emit EmergencyJitterWindowSet(vaultId, jitterWindow);
+    }
+
+    /**
+     * @dev Entry point called by the VRF coordinator with verified randomness.
+     * Only the configured coordinator may call this; the request id must
+     * match the latest one issued for the vault and can only be fulfilled
+     * once, so neither miners nor guardians can influence or replay the
+     * resulting unlock schedule.
+     */
+    function rawFulfillRandomWords(uint256 requestId, uint256[] calldata randomWords) external {
+        if (_vrfConfig.coordinator == address(0) || msg.sender != _vrfConfig.coordinator) {
+            revert OnlyVrfCoordinator();
+        }
+        if (randomWords.length == 0) revert VrfUnknownRequestId();
+
+        uint256 vaultId = _vaultIdByRequestId[requestId];
+        if (vaultId == 0) revert VrfUnknownRequestId();
+        if (emergencyUnlockAt[vaultId] != 0) revert VrfAlreadyFulfilled();
+
+        uint256 window = emergencyJitterWindow[vaultId] != 0
+            ? emergencyJitterWindow[vaultId]
+            : DEFAULT_EMERGENCY_JITTER_WINDOW;
+        uint256 jitter = randomWords[0] % window;
+        uint256 unlockAt = block.timestamp + EMERGENCY_UNLOCK_BASE_DELAY + jitter;
+
+        emergencyUnlockAt[vaultId] = unlockAt;
+        emit EmergencyUnlockScheduled(vaultId, unlockAt, jitter);
+    }
+
+    /**
+     * @dev Returns whether the latest VRF request for a vault has been
+     * fulfilled (a schedule exists).
+     */
+    function vrfRequestFulfilled(uint256 vaultId) public view returns (bool) {
+        return emergencyUnlockAt[vaultId] != 0;
+    }
+
+    /**
+     * @dev Returns the current VRF configuration.
+     */
+    function getVrfConfig() external view returns (
+        address coordinator,
+        bytes32 keyHash,
+        uint256 subscriptionId,
+        uint32 callbackGasLimit,
+        uint16 minimumRequestConfirmations
+    ) {
+        VrfConfig memory cfg = _vrfConfig;
+        return (
+            cfg.coordinator,
+            cfg.keyHash,
+            cfg.subscriptionId,
+            cfg.callbackGasLimit,
+            cfg.minimumRequestConfirmations
+        );
+    }
+
+    /**
+     * @dev Returns the scheduled emergency unlock summary for a vault.
+     */
+    function getEmergencyUnlockSchedule(uint256 vaultId) external view returns (
+        bool requested,
+        bool fulfilled,
+        uint256 unlockAt
+    ) {
+        uint256 requestId = vrfRequestIdByVault[vaultId];
+        return (requestId != 0, emergencyUnlockAt[vaultId] != 0, emergencyUnlockAt[vaultId]);
     }
 
     /**
@@ -673,6 +1088,157 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         emit VaultReconfigurationExecuted(vaultId, guardianToRemove, newThreshold);
     }
 
+    // ------------------------------------------------------------------
+    // Proactive Secret Sharing (zero-sharing based share refresh)
+    // ------------------------------------------------------------------
+
+    /**
+     * @dev Opens a reshare window for a document's guardian shares.
+     * Every current guardian must publish a zero-polynomial commitment
+     * before {applyShareRefresh} can bump the share epoch.
+     * @param documentId The document whose shares are being refreshed.
+     * @param duration Length of the submission window (1 hour .. 7 days).
+     */
+    function startShareRefresh(uint256 documentId, uint256 duration) external {
+        if (documents[documentId].id == 0) revert DocumentNotExist();
+        uint256 vaultId = documents[documentId].vaultId;
+        if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
+        if (reshareSessions[documentId].active) revert ReshareSessionAlreadyActive();
+        if (duration < 1 hours || duration > 7 days) revert InvalidReshareDuration();
+
+        uint256 nextEpoch = shareEpoch[documentId] + 1;
+        ReshareSession storage session = reshareSessions[documentId];
+        session.startedAt = block.timestamp;
+        session.deadline = block.timestamp + duration;
+        session.submittedCount = 0;
+        session.active = true;
+
+        emit ShareRefreshStarted(documentId, nextEpoch, session.deadline);
+    }
+
+    /**
+     * @dev Guardian submits Feldman-style commitments to its zero-polynomial
+     * h_i(x) with the defining property h_i(0) = 0 (enforced on-chain by
+     * requiring commitments[0] == bytes32(0)). Off-chain, h_i(j) is derived
+     * from these commitments and added to guardian j's share.
+     * @param documentId The document whose shares are being refreshed.
+     * @param commitments Coefficient commitments [g^a_0, g^a_1, ..., g^a_t]
+     *        where a_0 must be zero.
+     */
+    function submitZeroShareCommitment(uint256 documentId, bytes32[] calldata commitments) external {
+        if (documents[documentId].id == 0) revert DocumentNotExist();
+        ReshareSession storage session = reshareSessions[documentId];
+        if (!session.active) revert ReshareSessionNotActive();
+        if (block.timestamp > session.deadline) revert ReshareDeadlineExceeded();
+
+        uint256 vaultId = documents[documentId].vaultId;
+        if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
+
+        uint256 epoch = shareEpoch[documentId] + 1;
+        if (_zeroShareSubmitted[documentId][epoch][msg.sender]) {
+            revert ZeroShareAlreadySubmitted();
+        }
+        if (commitments.length < 2 || commitments[0] != bytes32(0)) {
+            revert InvalidZeroShareCommitment();
+        }
+
+        _zeroShareSubmitted[documentId][epoch][msg.sender] = true;
+        zeroShareCommitments[documentId][epoch][msg.sender] = commitments;
+        session.submittedCount += 1;
+
+        emit ZeroShareCommitmentSubmitted(documentId, epoch, msg.sender, commitments.length - 1);
+    }
+
+    /**
+     * @dev Finalizes the refresh once every current guardian has published a
+     * zero-share commitment. Stores the redistributed (re-encrypted) shares
+     * and irreversibly bumps the share epoch, invalidating all pre-refresh
+     * share material for this document.
+     * @param documentId The document whose shares are being refreshed.
+     * @param guardiansList Full guardian set of the vault (order defines
+     *        the polynomial evaluation points used off-chain).
+     * @param newShares Updated ECIES-encrypted shares, one per guardian.
+     */
+    function applyShareRefresh(
+        uint256 documentId,
+        address[] calldata guardiansList,
+        string[] calldata newShares
+    ) external {
+        if (documents[documentId].id == 0) revert DocumentNotExist();
+        ReshareSession storage session = reshareSessions[documentId];
+        if (!session.active) revert ReshareSessionNotActive();
+
+        uint256 vaultId = documents[documentId].vaultId;
+        if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
+
+        address[] storage vaultGuardians = vaults[vaultId].guardians;
+        if (
+            guardiansList.length != vaultGuardians.length ||
+            newShares.length != guardiansList.length
+        ) {
+            revert InvalidShareRefreshInput();
+        }
+
+        for (uint256 i = 0; i < guardiansList.length; i++) {
+            address guardian = guardiansList[i];
+            if (!isGuardian[vaultId][guardian]) revert InvalidShareRefreshInput();
+
+            for (uint256 j = 0; j < i; j++) {
+                if (guardiansList[j] == guardian) revert InvalidShareRefreshInput();
+            }
+
+            encryptedGuardianShares[documentId][guardian] = newShares[i];
+        }
+
+        if (session.submittedCount < vaultGuardians.length) {
+            if (block.timestamp <= session.deadline) revert ReshareDeadlineNotReached();
+            revert ReshareIncomplete();
+        }
+
+        session.active = false;
+        uint256 newEpoch = shareEpoch[documentId] + 1;
+        shareEpoch[documentId] = newEpoch;
+
+        emit SharesRefreshed(documentId, newEpoch);
+    }
+
+    /**
+     * @dev Returns whether a guardian has submitted its zero-share commitment
+     * for the given epoch.
+     */
+    function hasSubmittedZeroShare(
+        uint256 documentId,
+        uint256 epoch,
+        address guardian
+    ) external view returns (bool) {
+        return _zeroShareSubmitted[documentId][epoch][guardian];
+    }
+
+    /**
+     * @dev Returns the full zero-polynomial commitment vector published by
+     * `guardian` for `epoch`. commitments[0] is always bytes32(0).
+     */
+    function getZeroShareCommitments(
+        uint256 documentId,
+        uint256 epoch,
+        address guardian
+    ) external view returns (bytes32[] memory) {
+        return zeroShareCommitments[documentId][epoch][guardian];
+    }
+
+    /**
+     * @dev Returns the active reshare session summary for a document.
+     */
+    function getReshareSession(uint256 documentId) external view returns (
+        uint256 startedAt,
+        uint256 deadline,
+        uint256 submittedCount,
+        bool active
+    ) {
+        ReshareSession storage session = reshareSessions[documentId];
+        return (session.startedAt, session.deadline, session.submittedCount, session.active);
+    }
+
     /**
      * @dev Internal helper to remove a guardian from a vault.
      */
@@ -811,6 +1377,13 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         uint256 vaultId = documents[request.documentId].vaultId;
         if (!isGuardian[vaultId][msg.sender]) revert OnlyGuardian();
         if (hasApprovedRequest[requestId][msg.sender]) revert AlreadyApproved();
+
+        // A guardian whose registered key is blacklisted as compromised may not submit
+        // new key material until it has been rotated via revokeKey().
+        bytes memory guardianKey = bytes(userPublicKeys[msg.sender]);
+        if (guardianKey.length != 0 && _revokedKeyHashes[keccak256(guardianKey)]) {
+            revert RevokedPublicKey();
+        }
 
         hasApprovedRequest[requestId][msg.sender] = true;
         request.approvedBy.push(msg.sender);
@@ -1149,7 +1722,23 @@ contract SpooVault is ERC721, ISpooVault, ReentrancyGuard {
         }
 
         if (condition == ReleaseCondition.EMERGENCY_ONLY) {
-            return _vaultReleaseStates[vaultId].emergencyMode || postDeathUnlocked;
+            if (postDeathUnlocked) {
+                // The post-death track is independent of emergency jitter.
+                return true;
+            }
+            if (!_vaultReleaseStates[vaultId].emergencyMode) {
+                return false;
+            }
+
+            uint256 scheduledAt = emergencyUnlockAt[vaultId];
+            if (vrfRequestIdByVault[vaultId] != 0) {
+                // VRF-gated vault: releasable only at the verifiably
+                // scheduled time (pending requests stay locked).
+                return block.timestamp >= scheduledAt && scheduledAt != 0;
+            }
+
+            // Legacy behavior for deployments without VRF configured.
+            return true;
         }
 
         if (condition == ReleaseCondition.POST_DEATH_ONLY) {
