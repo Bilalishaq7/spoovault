@@ -1,4 +1,8 @@
-import { describe, it, expect } from "@jest/globals";
+// Declare ambient testing globals to satisfy TypeScript compiler
+declare const describe: any;
+declare const it: any;
+declare const expect: any;
+
 import { VdfTimelockEngine } from "../services/vdfTimelock.service";
 
 describe("VDF Timelock Encryption Engine", () => {
