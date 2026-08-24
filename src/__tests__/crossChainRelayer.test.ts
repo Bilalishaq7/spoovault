@@ -24,10 +24,8 @@ describe("Axelar Cross-Chain Message Relayer", () => {
   it("prevents replay attacks on duplicate execution", () => {
     const signedPayload = CrossChainRelayerService.signPayload(mockPayload, secretKey);
     
-    // First processing succeeds
     relayer.processMessage(signedPayload, secretKey);
 
-    // Second processing throws replay error
     expect(() => relayer.processMessage(signedPayload, secretKey)).toThrow(
       "Replay attack detected: Message already processed"
     );

@@ -11,18 +11,12 @@ export interface CrossChainPayload {
 export class CrossChainRelayerService {
   private processedHashes: Set<string> = new Set();
 
-  /**
-   * Encodes and cryptographically signs cross-chain approval payload
-   */
   static signPayload(payload: CrossChainPayload, secretKey: string): CrossChainPayload {
     const rawData = `${payload.vaultGID}:${payload.guardian}:${payload.approvalType}:${payload.timestamp}`;
     const signature = crypto.createHmac("sha256", secretKey).update(rawData).digest("hex");
     return { ...payload, signature };
   }
 
-  /**
-   * Verifies signature and checks for replay protection
-   */
   processMessage(payload: CrossChainPayload, secretKey: string): { success: boolean; messageHash: string } {
     const rawData = `${payload.vaultGID}:${payload.guardian}:${payload.approvalType}:${payload.timestamp}`;
     const expectedSig = crypto.createHmac("sha256", secretKey).update(rawData).digest("hex");
