@@ -1,3 +1,5 @@
+import crypto from "crypto";
+
 export interface VdfSetup {
   targetSteps: number;
   seed: string;
@@ -10,56 +12,30 @@ export interface VdfProof {
 }
 
 export class VdfTimelockEngine {
-  private static getCrypto(): Crypto {
-    if (typeof window !== 'undefined' && window.crypto) {
-      return window.crypto;
-    }
-    // Fallback for Node.js environments
-    return require('node:crypto').webcrypto as unknown as Crypto;
-  }
-
   /**
    * Derive symmetric key K = H(VDF_output)
    */
-  static async deriveKey(vdfOutput: string): Promise<any> {
-    const cryptoObj = this.getCrypto();
-    const encoder = new TextEncoder();
-    const data = encoder.encode(vdfOutput);
-    const hashBuffer = await cryptoObj.subtle.digest("SHA-256", data);
-    return await cryptoObj.subtle.importKey(
-      "raw",
-      hashBuffer,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"]
-    );
+  static async deriveKey(vdfOutput: string): Promise<Buffer> {
+    return crypto.createHash("sha256").update(vdfOutput).digest();
   }
 
   /**
    * Evaluates sequential squaring VDF over T steps
    */
   static async evaluateVdf(seed: string, targetSteps: number): Promise<VdfProof> {
-    const cryptoObj = this.getCrypto();
-    const encoder = new TextEncoder();
-    let current = encoder.encode(seed);
+    let current = Buffer.from(seed);
 
     for (let i = 0; i < targetSteps; i++) {
-      const buf = await cryptoObj.subtle.digest("SHA-256", current);
-      current = new Uint8Array(buf);
+      current = crypto.createHash("sha256").update(current).digest();
     }
 
-    const outputHex = Array.from(current)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    const outputHex = current.toString("hex");
 
     // Succinct proof calculation H(seed || output || steps)
-    const proofBuf = await cryptoObj.subtle.digest(
-      "SHA-256",
-      encoder.encode(`${seed}:${outputHex}:${targetSteps}`)
-    );
-    const proofHex = Array.from(new Uint8Array(proofBuf))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    const proofHex = crypto
+      .createHash("sha256")
+      .update(`${seed}:${outputHex}:${targetSteps}`)
+      .digest("hex");
 
     return {
       output: outputHex,
@@ -72,23 +48,16 @@ export class VdfTimelockEngine {
    * Encrypt document using derived key
    */
   static async encryptDocument(plaintext: string, vdfOutput: string) {
-    const cryptoObj = this.getCrypto();
     const key = await this.deriveKey(vdfOutput);
-    const iv = cryptoObj.getRandomValues(new Uint8Array(12));
-    const encoder = new TextEncoder();
-    const ciphertext = await cryptoObj.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      key,
-      encoder.encode(plaintext)
-    );
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+    
+    let encrypted = cipher.update(plaintext, "utf8", "hex");
+    encrypted += cipher.final("hex");
 
     return {
-      ciphertext: Array.from(new Uint8Array(ciphertext))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join(""),
-      iv: Array.from(iv)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join(""),
+      ciphertext: encrypted,
+      iv: iv.toString("hex"),
     };
   }
 }
