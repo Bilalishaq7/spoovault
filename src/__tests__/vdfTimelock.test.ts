@@ -1,3 +1,4 @@
+import { describe, it, expect } from "@jest/globals";
 import { VdfTimelockEngine } from "../services/vdfTimelock.service";
 
 describe("VDF Timelock Encryption Engine", () => {

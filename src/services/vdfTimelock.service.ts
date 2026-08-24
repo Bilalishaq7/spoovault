@@ -1,5 +1,3 @@
-import { webcrypto } from "node:crypto";
-
 export interface VdfSetup {
   targetSteps: number;
   seed: string;
@@ -12,14 +10,23 @@ export interface VdfProof {
 }
 
 export class VdfTimelockEngine {
+  private static getCrypto(): Crypto {
+    if (typeof window !== 'undefined' && window.crypto) {
+      return window.crypto;
+    }
+    // Fallback for Node.js environments
+    return require('node:crypto').webcrypto as unknown as Crypto;
+  }
+
   /**
    * Derive symmetric key K = H(VDF_output)
    */
-  static async deriveKey(vdfOutput: string): Promise<CryptoKey> {
+  static async deriveKey(vdfOutput: string): Promise<any> {
+    const cryptoObj = this.getCrypto();
     const encoder = new TextEncoder();
     const data = encoder.encode(vdfOutput);
-    const hashBuffer = await webcrypto.subtle.digest("SHA-256", data);
-    return await webcrypto.subtle.importKey(
+    const hashBuffer = await cryptoObj.subtle.digest("SHA-256", data);
+    return await cryptoObj.subtle.importKey(
       "raw",
       hashBuffer,
       { name: "AES-GCM", length: 256 },
@@ -32,11 +39,12 @@ export class VdfTimelockEngine {
    * Evaluates sequential squaring VDF over T steps
    */
   static async evaluateVdf(seed: string, targetSteps: number): Promise<VdfProof> {
+    const cryptoObj = this.getCrypto();
     const encoder = new TextEncoder();
     let current = encoder.encode(seed);
 
     for (let i = 0; i < targetSteps; i++) {
-      const buf = await webcrypto.subtle.digest("SHA-256", current);
+      const buf = await cryptoObj.subtle.digest("SHA-256", current);
       current = new Uint8Array(buf);
     }
 
@@ -45,7 +53,7 @@ export class VdfTimelockEngine {
       .join("");
 
     // Succinct proof calculation H(seed || output || steps)
-    const proofBuf = await webcrypto.subtle.digest(
+    const proofBuf = await cryptoObj.subtle.digest(
       "SHA-256",
       encoder.encode(`${seed}:${outputHex}:${targetSteps}`)
     );
@@ -64,10 +72,11 @@ export class VdfTimelockEngine {
    * Encrypt document using derived key
    */
   static async encryptDocument(plaintext: string, vdfOutput: string) {
+    const cryptoObj = this.getCrypto();
     const key = await this.deriveKey(vdfOutput);
-    const iv = webcrypto.getRandomValues(new Uint8Array(12));
+    const iv = cryptoObj.getRandomValues(new Uint8Array(12));
     const encoder = new TextEncoder();
-    const ciphertext = await webcrypto.subtle.encrypt(
+    const ciphertext = await cryptoObj.subtle.encrypt(
       { name: "AES-GCM", iv },
       key,
       encoder.encode(plaintext)
