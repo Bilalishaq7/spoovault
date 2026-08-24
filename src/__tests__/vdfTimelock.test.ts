@@ -1,3 +1,4 @@
+import { describe, it, expect } from "vitest";
 import { VdfTimelockEngine } from "../services/vdfTimelock.service";
 
 describe("VDF Timelock Encryption Engine", () => {
